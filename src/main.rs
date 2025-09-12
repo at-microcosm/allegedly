@@ -45,7 +45,8 @@ struct Op<'a> {
     pub cid: &'a str,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub nullified: bool,
-    pub operation: serde_json::Value,
+    #[serde(borrow)]
+    pub operation: &'a serde_json::value::RawValue,
 }
 
 async fn export_upstream(
@@ -95,7 +96,7 @@ async fn export_upstream(
         let op: OpPeek = serde_json::from_str(last_line).unwrap();
         after = Some(op.created_at);
 
-        log::trace!("got {} ops until {after:?}, sending them...", ops.len());
+        log::trace!("got some ops until {after:?}, sending them...");
         tx.send_async(ExportPage { ops }).await.unwrap();
     }
 }
@@ -143,7 +144,7 @@ async fn write_pages(
                     insert_op,
                     &[
                         &op.did,
-                        &op.operation,
+                        &tokio_postgres::types::Json(op.operation),
                         &op.cid,
                         &op.nullified,
                         &op.created_at,
