@@ -1,11 +1,10 @@
 use clap::Parser;
 use serde::Deserialize;
-use std::io::Write;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 use url::Url;
 
-use allegedly::{ExportPage, PageForwarder};
+use allegedly::{ExportPage, week_to_pages};
 
 const EXPORT_PAGE_QUEUE_SIZE: usize = 0; // rendezvous for now
 const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
@@ -76,36 +75,7 @@ async fn bulk_backfill(
     while week < immutable_week {
         log::info!("backfilling week {week_n} ({week})");
         let url = upstream.join(&format!("{week}.jsonl.gz")).unwrap();
-        let mut gzipped_chunks = client
-            .get(url)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
-
-        let mut sink = PageForwarder::<1000>::new(tx.clone());
-        let mut decoder = flate2::write::GzDecoder::new(&mut sink);
-
-        while let Some(chunk) = gzipped_chunks.chunk().await.unwrap() {
-            tokio::task::block_in_place(|| {
-                let mut chunk = chunk;
-                while !chunk.is_empty() {
-                    let Ok(n) = decoder
-                        .write(&chunk)
-                        .inspect_err(|e| log::warn!("wat: {e}"))
-                    else {
-                        panic!("can't feed bytes to the decoder :/");
-                    };
-                    if n == 0 {
-                        panic!("apparently we can't write");
-                    }
-                    chunk = chunk.split_off(n);
-                }
-            });
-        }
-        decoder.flush().unwrap();
-
+        week_to_pages(&client, url, tx.clone()).await.unwrap();
         week_n += 1;
         week += WEEK_IN_SECONDS;
     }
@@ -121,9 +91,8 @@ async fn export_upstream(
         .user_agent(concat!(
             "allegedly v",
             env!("CARGO_PKG_VERSION"),
-            " (part of @microcosm.blue; contact @bad-example.com)"
+            " (from @microcosm.blue; contact @bad-example.com)"
         ))
-        .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -165,6 +134,7 @@ async fn export_upstream(
         after = Some(op.created_at);
 
         log::trace!("got some ops until {after:?}, sending them...");
+        let ops = ops.split('\n').map(Into::into).collect();
         tx.send_async(ExportPage { ops }).await.unwrap();
     }
 }
@@ -192,16 +162,27 @@ async fn write_pages(
         .unwrap();
 
     while let Ok(page) = rx.recv_async().await {
-        log::info!("got a page...");
+        log::trace!("got a page...");
 
         let mut tx = pg_client.transaction().await.unwrap();
 
         // TODO: probably figure out postgres COPY IN
         // for now just write everything into a transaction
 
-        log::info!("setting up inserts...");
-        for op_line in page.ops.lines() {
-            let Ok(op) = serde_json::from_str::<Op>(op_line)
+        log::trace!("setting up inserts...");
+        for op_line in page
+            .ops
+            .into_iter()
+            .flat_map(|s| {
+                s.replace("}{", "}\n{")
+                    .split('\n')
+                    .map(|s| s.trim())
+                    .map(Into::into)
+                    .collect::<Vec<String>>()
+            })
+            .filter(|s| !s.is_empty())
+        {
+            let Ok(op) = serde_json::from_str::<Op>(&op_line)
                 .inspect_err(|e| log::error!("failing! at the {op_line}! {e}"))
             else {
                 log::error!("ayeeeee just ignoring this error for now......");
@@ -236,8 +217,6 @@ async fn write_pages(
         }
 
         tx.commit().await.unwrap();
-
-        log::info!("hi from writer! (done page)");
     }
     Ok(())
 }
