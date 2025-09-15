@@ -13,14 +13,26 @@ pub type Dt = chrono::DateTime<chrono::Utc>;
 /// One page of PLC export
 ///
 /// Not limited, but expected to have up to about 1000 lines
+#[derive(Debug)]
 pub struct ExportPage {
     pub ops: Vec<String>,
 }
 
-#[derive(Deserialize)]
+impl ExportPage {
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OpPeek {
+pub struct Op<'a> {
+    pub did: &'a str,
+    pub cid: &'a str,
     pub created_at: Dt,
+    pub nullified: bool,
+    #[serde(borrow)]
+    pub operation: &'a serde_json::value::RawValue,
 }
 
 pub fn bin_init(name: &str) {

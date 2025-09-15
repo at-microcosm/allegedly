@@ -1,4 +1,4 @@
-use crate::{CLIENT, Dt, ExportPage, OpPeek};
+use crate::{CLIENT, Dt, ExportPage, Op};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -13,7 +13,60 @@ pub enum GetPageError {
     SerdeError(#[from] serde_json::Error),
 }
 
-pub async fn get_page(url: Url) -> Result<(ExportPage, Option<Dt>), GetPageError> {
+/// ops are primary-keyed by (did, cid)
+/// plc orders by `created_at` but does not guarantee distinct times per op
+/// we assume that the order will at least be deterministic: this may be unsound
+#[derive(Debug, PartialEq)]
+pub struct LastOp {
+    created_at: Dt,       // any op greater is definitely not duplicated
+    pk: (String, String), // did, cid
+}
+
+impl From<Op<'_>> for LastOp {
+    fn from(op: Op) -> Self {
+        Self {
+            created_at: op.created_at,
+            pk: (op.did.to_string(), op.cid.to_string()),
+        }
+    }
+}
+
+impl From<Dt> for LastOp {
+    fn from(dt: Dt) -> Self {
+        Self {
+            created_at: dt,
+            pk: ("".to_string(), "".to_string()),
+        }
+    }
+}
+
+impl ExportPage {
+    /// this is a (slightly flawed) op deduplicator
+    fn only_after_last(&mut self, last_op: &LastOp) {
+        loop {
+            let Some(s) = self.ops.first().cloned() else {
+                break;
+            };
+            let Ok(op) = serde_json::from_str::<Op>(&s) else {
+                log::warn!(
+                    "deduplication failed op parsing ({s:?}), bailing for downstream to deal with."
+                );
+                break;
+            };
+            if op.created_at > last_op.created_at {
+                break;
+            }
+            log::trace!("dedup: dropping an op");
+            self.ops.remove(0);
+            if Into::<LastOp>::into(op) == *last_op {
+                log::trace!("dedup: found exact op, keeping all after here");
+                break;
+            }
+        }
+    }
+}
+
+pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageError> {
     log::trace!("Getting page: {url}");
 
     let ops: Vec<String> = CLIENT
@@ -25,18 +78,22 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<Dt>), GetPageError
         .await?
         .trim()
         .split('\n')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() { None } else { Some(s) }
+        })
         .map(Into::into)
         .collect();
 
-    let last_at = ops
+    let last_op = ops
         .last()
         .filter(|s| !s.is_empty())
-        .map(|s| serde_json::from_str::<OpPeek>(s))
+        .map(|s| serde_json::from_str::<Op>(s))
         .transpose()?
-        .map(|o| o.created_at)
-        .inspect(|at| log::trace!("new last_at: {at}"));
+        .map(Into::into)
+        .inspect(|at| log::trace!("new last op: {at:?}"));
 
-    Ok((ExportPage { ops }, last_at))
+    Ok((ExportPage { ops }, last_op))
 }
 
 pub async fn poll_upstream(
@@ -45,15 +102,24 @@ pub async fn poll_upstream(
     dest: flume::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
-    let mut after = after;
+    let mut prev_last: Option<LastOp> = after.map(Into::into);
     loop {
         tick.tick().await;
+
         let mut url = base.clone();
-        if let Some(a) = after {
-            url.query_pairs_mut().append_pair("after", &a.to_rfc3339());
+        if let Some(ref pl) = prev_last {
+            url.query_pairs_mut()
+                .append_pair("after", &pl.created_at.to_rfc3339());
         };
-        let (page, next_after) = get_page(url).await?;
-        dest.send_async(page).await?;
-        after = next_after.or(after);
+
+        let (mut page, next_last) = get_page(url).await?;
+        if let Some(ref pl) = prev_last {
+            page.only_after_last(pl);
+        }
+        if !page.is_empty() {
+            dest.send_async(page).await?;
+        }
+
+        prev_last = next_last.or(prev_last);
     }
 }
