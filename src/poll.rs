@@ -1,5 +1,4 @@
-use crate::{ExportPage, OpPeek};
-use chrono::{DateTime, Utc};
+use crate::{CLIENT, Dt, ExportPage, OpPeek};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -14,11 +13,10 @@ pub enum GetPageError {
     SerdeError(#[from] serde_json::Error),
 }
 
-pub async fn get_page(
-    client: &reqwest::Client,
-    url: Url,
-) -> Result<(ExportPage, Option<DateTime<Utc>>), GetPageError> {
-    let ops: Vec<String> = client
+pub async fn get_page(url: Url) -> Result<(ExportPage, Option<Dt>), GetPageError> {
+    log::trace!("Getting page: {url}");
+
+    let ops: Vec<String> = CLIENT
         .get(url)
         .send()
         .await?
@@ -32,16 +30,17 @@ pub async fn get_page(
 
     let last_at = ops
         .last()
+        .filter(|s| !s.is_empty())
         .map(|s| serde_json::from_str::<OpPeek>(s))
         .transpose()?
-        .map(|o| o.created_at);
+        .map(|o| o.created_at)
+        .inspect(|at| log::trace!("new last_at: {at}"));
 
     Ok((ExportPage { ops }, last_at))
 }
 
 pub async fn poll_upstream(
-    client: &reqwest::Client,
-    after: Option<DateTime<Utc>>,
+    after: Option<Dt>,
     base: Url,
     dest: flume::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
@@ -53,8 +52,8 @@ pub async fn poll_upstream(
         if let Some(a) = after {
             url.query_pairs_mut().append_pair("after", &a.to_rfc3339());
         };
-        let (page, next_after) = get_page(client, url).await?;
+        let (page, next_after) = get_page(url).await?;
         dest.send_async(page).await?;
-        after = next_after;
+        after = next_after.or(after);
     }
 }

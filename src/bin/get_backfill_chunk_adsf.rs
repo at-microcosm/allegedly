@@ -1,18 +1,10 @@
+use allegedly::CLIENT;
 use async_compression::futures::bufread::GzipDecoder;
 use futures::{AsyncBufReadExt, StreamExt, TryStreamExt, io};
 
 #[tokio::main]
 async fn main() {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!(
-            "allegedly (blah) v",
-            env!("CARGO_PKG_VERSION"),
-            " (from @microcosm.blue; contact @bad-example.com)"
-        ))
-        .build()
-        .unwrap();
-
-    let reader = client
+    let reader = CLIENT
         .get("https://plc.t3.storage.dev/plc.directory/1699488000.jsonl.gz")
         // .get("https://plc.t3.storage.dev/plc.directory/1669248000.jsonl.gz")
         .send()

@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio_postgres::NoTls;
 use url::Url;
 
-use allegedly::{ExportPage, poll_upstream, week_to_pages};
+use allegedly::{Dt, ExportPage, bin_init, poll_upstream, week_to_pages};
 
 const EXPORT_PAGE_QUEUE_SIZE: usize = 0; // rendezvous for now
 const WEEK_IN_SECONDS: u64 = 7 * 86400;
@@ -47,17 +47,13 @@ struct Args {
 struct Op<'a> {
     pub did: &'a str,
     pub cid: &'a str,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: Dt,
     pub nullified: bool,
     #[serde(borrow)]
     pub operation: &'a serde_json::value::RawValue,
 }
 
-async fn bulk_backfill(
-    client: reqwest::Client,
-    (upstream, epoch): (Url, u64),
-    tx: flume::Sender<ExportPage>,
-) {
+async fn bulk_backfill((upstream, epoch): (Url, u64), tx: flume::Sender<ExportPage>) {
     let immutable_cutoff = std::time::SystemTime::now() - Duration::from_secs((7 + 4) * 86400);
     let immutable_ts = (immutable_cutoff.duration_since(std::time::SystemTime::UNIX_EPOCH))
         .unwrap()
@@ -68,7 +64,7 @@ async fn bulk_backfill(
     while week < immutable_week {
         log::info!("backfilling week {week_n} ({week})");
         let url = upstream.join(&format!("{week}.jsonl.gz")).unwrap();
-        week_to_pages(&client, url, tx.clone()).await.unwrap();
+        week_to_pages(url, tx.clone()).await.unwrap();
         week_n += 1;
         week += WEEK_IN_SECONDS;
     }
@@ -81,21 +77,13 @@ async fn export_upstream(
     pg_client: tokio_postgres::Client,
 ) {
     let latest = get_latest(&pg_client).await;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!(
-            "allegedly v",
-            env!("CARGO_PKG_VERSION"),
-            " (from @microcosm.blue; contact @bad-example.com)"
-        ))
-        .build()
-        .unwrap();
 
     if latest.is_none() {
-        bulk_backfill(client.clone(), bulk, tx.clone()).await;
+        bulk_backfill(bulk, tx.clone()).await;
     }
     let mut upstream = upstream;
     upstream.set_path("/export");
-    poll_upstream(&client, latest, upstream, tx).await.unwrap();
+    poll_upstream(latest, upstream, tx).await.unwrap();
 }
 
 async fn write_pages(
@@ -180,7 +168,7 @@ async fn write_pages(
     Ok(())
 }
 
-async fn get_latest(pg_client: &tokio_postgres::Client) -> Option<chrono::DateTime<chrono::Utc>> {
+async fn get_latest(pg_client: &tokio_postgres::Client) -> Option<Dt> {
     pg_client
         .query_opt(
             r#"SELECT "createdAt" FROM operations
@@ -194,9 +182,7 @@ async fn get_latest(pg_client: &tokio_postgres::Client) -> Option<chrono::DateTi
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
-    log::info!(concat!("📜 Allegedly v", env!("CARGO_PKG_VERSION")));
-
+    bin_init("main");
     let args = Args::parse();
 
     log::trace!("connecting postgres...");

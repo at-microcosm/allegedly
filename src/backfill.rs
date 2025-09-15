@@ -1,15 +1,11 @@
-use crate::ExportPage;
+use crate::{CLIENT, ExportPage};
 use url::Url;
 
 use async_compression::futures::bufread::GzipDecoder;
 use futures::{AsyncBufReadExt, StreamExt, TryStreamExt, io};
 
-pub async fn week_to_pages(
-    client: &reqwest::Client,
-    url: Url,
-    dest: flume::Sender<ExportPage>,
-) -> anyhow::Result<()> {
-    let reader = client
+pub async fn week_to_pages(url: Url, dest: flume::Sender<ExportPage>) -> anyhow::Result<()> {
+    let reader = CLIENT
         .get(url)
         .send()
         .await?
