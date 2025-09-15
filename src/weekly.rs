@@ -72,5 +72,16 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
         }
     }
 
+    // don't forget the final file
+    encoder.shutdown().await?;
+    let now = Instant::now();
+    log::info!(
+        "done week {week:3 } ({:10 }): {week_ops:7 } ({:5.0 }/s) ops, {:5 }k total ({:5.0 }/s)",
+        current_week.unwrap_or(Week(0)).0,
+        (week_ops as f64) / (now - week_t0).as_secs_f64(),
+        total_ops / 1000,
+        (total_ops as f64) / (now - total_t0).as_secs_f64(),
+    );
+
     Ok(())
 }
