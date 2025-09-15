@@ -1,10 +1,8 @@
 use clap::Parser;
-use serde::Deserialize;
 use std::time::Duration;
-use tokio_postgres::NoTls;
 use url::Url;
 
-use allegedly::{Dt, ExportPage, bin_init, poll_upstream, week_to_pages};
+use allegedly::{Db, Dt, ExportPage, Op, bin_init, poll_upstream, week_to_pages};
 
 const EXPORT_PAGE_QUEUE_SIZE: usize = 0; // rendezvous for now
 const WEEK_IN_SECONDS: u64 = 7 * 86400;
@@ -40,17 +38,6 @@ struct Args {
     /// URI string with credentials etc
     #[arg(long, env)]
     postgres: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Op<'a> {
-    pub did: &'a str,
-    pub cid: &'a str,
-    pub created_at: Dt,
-    pub nullified: bool,
-    #[serde(borrow)]
-    pub operation: &'a serde_json::value::RawValue,
 }
 
 async fn bulk_backfill((upstream, epoch): (Url, u64), tx: flume::Sender<ExportPage>) {
@@ -181,52 +168,31 @@ async fn get_latest(pg_client: &tokio_postgres::Client) -> Option<Dt> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     bin_init("main");
     let args = Args::parse();
-
-    log::trace!("connecting postgres...");
-    let (pg_client, connection) = tokio_postgres::connect(&args.postgres, NoTls)
-        .await
-        .unwrap();
-
-    // send the connection away to do the actual communication work
-    // TODO: error and shutdown handling
-    let conn_task = tokio::task::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {e}");
-        }
-    });
-
-    log::trace!("connecting postgres 2...");
-    let (pg_client2, connection2) = tokio_postgres::connect(&args.postgres, NoTls)
-        .await
-        .unwrap();
-
-    // send the connection away to do the actual communication work
-    // TODO: error and shutdown handling
-    let conn_task2 = tokio::task::spawn(async move {
-        if let Err(e) = connection2.await {
-            eprintln!("connection error: {e}");
-        }
-    });
-
+    let db = Db::new(&args.postgres);
     let (tx, rx) = flume::bounded(EXPORT_PAGE_QUEUE_SIZE);
 
+    log::trace!("connecting postgres for export task...");
+    let pg_client = db.connect().await?;
     let export_task = tokio::task::spawn(export_upstream(
         args.upstream,
         (args.upstream_bulk, args.bulk_epoch),
         tx,
-        pg_client2,
+        pg_client,
     ));
+
+    log::trace!("connecting postgres for writer task...");
+    let pg_client = db.connect().await?;
     let writer_task = tokio::task::spawn(write_pages(rx, pg_client));
 
     tokio::select! {
-        z = conn_task => log::warn!("connection task ended: {z:?}"),
-        z = conn_task2 => log::warn!("connection task ended: {z:?}"),
         z = export_task => log::warn!("export task ended: {z:?}"),
         z = writer_task => log::warn!("writer task ended: {z:?}"),
     };
 
     log::error!("todo: shutdown");
+
+    Ok(())
 }

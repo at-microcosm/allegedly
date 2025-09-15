@@ -2,10 +2,12 @@ use serde::Deserialize;
 
 mod backfill;
 mod client;
+mod plc_pg;
 mod poll;
 
 pub use backfill::week_to_pages;
 pub use client::CLIENT;
+pub use plc_pg::Db;
 pub use poll::poll_upstream;
 
 pub type Dt = chrono::DateTime<chrono::Utc>;
