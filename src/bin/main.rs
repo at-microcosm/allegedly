@@ -4,10 +4,9 @@ use std::time::Duration;
 use tokio_postgres::NoTls;
 use url::Url;
 
-use allegedly::{ExportPage, week_to_pages};
+use allegedly::{ExportPage, poll_upstream, week_to_pages};
 
 const EXPORT_PAGE_QUEUE_SIZE: usize = 0; // rendezvous for now
-const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 const WEEK_IN_SECONDS: u64 = 7 * 86400;
 
 #[derive(Parser)]
@@ -41,12 +40,6 @@ struct Args {
     /// URI string with credentials etc
     #[arg(long, env)]
     postgres: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpPeek {
-    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Deserialize)]
@@ -85,8 +78,9 @@ async fn export_upstream(
     upstream: Url,
     bulk: (Url, u64),
     tx: flume::Sender<ExportPage>,
-    latest: Option<chrono::DateTime<chrono::Utc>>,
+    pg_client: tokio_postgres::Client,
 ) {
+    let latest = get_latest(&pg_client).await;
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "allegedly v",
@@ -99,44 +93,9 @@ async fn export_upstream(
     if latest.is_none() {
         bulk_backfill(client.clone(), bulk, tx.clone()).await;
     }
-
     let mut upstream = upstream;
     upstream.set_path("/export");
-    let mut after = latest;
-    let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
-
-    loop {
-        tick.tick().await;
-        let mut url = upstream.clone();
-        if let Some(ref after) = after {
-            url.query_pairs_mut()
-                .append_pair("after", &after.to_rfc3339());
-        }
-        let ops = client
-            .get(url)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-            .trim()
-            .to_string();
-
-        let Some((_, last_line)) = ops.rsplit_once('\n') else {
-            log::trace!("no ops in response page, nothing to do");
-            continue;
-        };
-
-        let op: OpPeek = serde_json::from_str(last_line).unwrap();
-        after = Some(op.created_at);
-
-        log::trace!("got some ops until {after:?}, sending them...");
-        let ops = ops.split('\n').map(Into::into).collect();
-        tx.send_async(ExportPage { ops }).await.unwrap();
-    }
+    poll_upstream(&client, latest, upstream, tx).await.unwrap();
 }
 
 async fn write_pages(
@@ -221,6 +180,18 @@ async fn write_pages(
     Ok(())
 }
 
+async fn get_latest(pg_client: &tokio_postgres::Client) -> Option<chrono::DateTime<chrono::Utc>> {
+    pg_client
+        .query_opt(
+            r#"SELECT "createdAt" FROM operations
+            ORDER BY "createdAt" DESC LIMIT 1"#,
+            &[],
+        )
+        .await
+        .unwrap()
+        .map(|r| r.get(0))
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -241,17 +212,18 @@ async fn main() {
         }
     });
 
-    let latest = pg_client
-        .query_opt(
-            r#"SELECT "createdAt" FROM operations
-            ORDER BY "createdAt" DESC LIMIT 1"#,
-            &[],
-        )
+    log::trace!("connecting postgres 2...");
+    let (pg_client2, connection2) = tokio_postgres::connect(&args.postgres, NoTls)
         .await
-        .unwrap()
-        .map(|r| r.get(0));
+        .unwrap();
 
-    log::info!("connected! latest: {latest:?}");
+    // send the connection away to do the actual communication work
+    // TODO: error and shutdown handling
+    let conn_task2 = tokio::task::spawn(async move {
+        if let Err(e) = connection2.await {
+            eprintln!("connection error: {e}");
+        }
+    });
 
     let (tx, rx) = flume::bounded(EXPORT_PAGE_QUEUE_SIZE);
 
@@ -259,12 +231,13 @@ async fn main() {
         args.upstream,
         (args.upstream_bulk, args.bulk_epoch),
         tx,
-        latest,
+        pg_client2,
     ));
     let writer_task = tokio::task::spawn(write_pages(rx, pg_client));
 
     tokio::select! {
         z = conn_task => log::warn!("connection task ended: {z:?}"),
+        z = conn_task2 => log::warn!("connection task ended: {z:?}"),
         z = export_task => log::warn!("export task ended: {z:?}"),
         z = writer_task => log::warn!("writer task ended: {z:?}"),
     };
