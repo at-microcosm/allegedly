@@ -77,28 +77,39 @@ async fn write_pages(
     rx: flume::Receiver<ExportPage>,
     mut pg_client: tokio_postgres::Client,
 ) -> Result<(), anyhow::Error> {
-    let upsert_did = &pg_client
-        .prepare(
-            r#"
-        INSERT INTO dids (did) VALUES ($1)
-            ON CONFLICT DO NOTHING"#,
-        )
-        .await
-        .unwrap();
+    // TODO: one big upsert at the end from select distinct on the other table
+
+    // let upsert_did = &pg_client
+    //     .prepare(
+    //         r#"
+    //     INSERT INTO dids (did) VALUES ($1)
+    //         ON CONFLICT DO NOTHING"#,
+    //     )
+    //     .await
+    //     .unwrap();
 
     let insert_op = &pg_client
         .prepare(
             r#"
         INSERT INTO operations (did, operation, cid, nullified, "createdAt")
-        VALUES ($1, $2, $3, $4, $5)"#,
-        ) // TODO: check that it hasn't changed
+        VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (did, cid) DO UPDATE
+           SET nullified = excluded.nullified,
+               "createdAt" = excluded."createdAt"
+         WHERE operations.nullified = excluded.nullified
+            OR operations."createdAt" = excluded."createdAt""#,
+        ) // idea: op is provable via cid, so leave it out. after did/cid (pk) that leaves nullified and createdAt
+        // that we want to notice changing.
+        // normal insert: no conflict, rows changed = 1
+        // conflict (exact match): where clause passes, rows changed = 1
+        // conflict (mismatch): where clause fails, rows changed = 0 (detect this and warn!)
         .await
         .unwrap();
 
     while let Ok(page) = rx.recv_async().await {
         log::trace!("got a page...");
 
-        let mut tx = pg_client.transaction().await.unwrap();
+        let tx = pg_client.transaction().await.unwrap();
 
         // TODO: probably figure out postgres COPY IN
         // for now just write everything into a transaction
@@ -122,12 +133,12 @@ async fn write_pages(
                 log::error!("ayeeeee just ignoring this error for now......");
                 continue;
             };
-            let client = &tx;
+            // let client = &tx;
 
-            client.execute(upsert_did, &[&op.did]).await.unwrap();
+            // client.execute(upsert_did, &[&op.did]).await.unwrap();
 
-            let sp = tx.savepoint("op").await.unwrap();
-            if let Err(e) = sp
+            // let sp = tx.savepoint("op").await.unwrap();
+            let inserted = tx
                 .execute(
                     insert_op,
                     &[
@@ -139,15 +150,19 @@ async fn write_pages(
                     ],
                 )
                 .await
-            {
-                if e.code() != Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                    anyhow::bail!(e);
-                }
-                // TODO: assert that the row has not changed
-                log::warn!("ignoring dup");
-            } else {
-                sp.commit().await.unwrap();
+                .unwrap();
+            if inserted != 1 {
+                log::warn!(
+                    "possible log modification: {inserted} rows changed after upserting {op:?}"
+                );
             }
+            // {
+            //     if e.code() != Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+            //         anyhow::bail!(e);
+            //     }
+            //     // TODO: assert that the row has not changed
+            //     log::warn!("ignoring dup");
+            // }
         }
 
         tx.commit().await.unwrap();

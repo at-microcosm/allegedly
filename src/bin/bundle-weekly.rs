@@ -1,4 +1,4 @@
-use allegedly::{bin_init, pages_to_weeks, poll_upstream};
+use allegedly::{Week, bin_init, pages_to_weeks, poll_upstream};
 use clap::Parser;
 use std::path::PathBuf;
 use url::Url;
@@ -23,7 +23,7 @@ struct Args {
     ///
     /// Must be a week-truncated unix timestamp
     #[arg(long, env)]
-    start_at: Option<u64>, // TODO!!
+    start_at: Option<i64>,
 }
 
 #[tokio::main]
@@ -34,13 +34,15 @@ async fn main() -> anyhow::Result<()> {
     let mut url = args.upstream;
     url.set_path("/export");
 
+    let after = args.start_at.map(|n| Week::from_n(n).into());
+
     log::trace!("ensure weekly output directory exists");
     std::fs::create_dir_all(&args.dir)?;
 
     let (tx, rx) = flume::bounded(PAGE_QUEUE_SIZE);
 
     tokio::task::spawn(async move {
-        if let Err(e) = poll_upstream(None /*todo*/, url, tx).await {
+        if let Err(e) = poll_upstream(after, url, tx).await {
             log::error!("polling failed: {e}");
         } else {
             log::warn!("poller finished ok (weird?)");

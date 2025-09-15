@@ -8,6 +8,17 @@ const WEEK_IN_SECONDS: i64 = 7 * 86400;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Week(i64);
 
+impl Week {
+    pub fn from_n(n: i64) -> Self {
+        Self(n)
+    }
+    pub fn n_ago(&self) -> i64 {
+        let Self(us) = self;
+        let Self(cur) = chrono::Utc::now().into();
+        (cur - us) / WEEK_IN_SECONDS
+    }
+}
+
 impl From<Dt> for Week {
     fn from(dt: Dt) -> Self {
         let ts = dt.timestamp();
@@ -35,7 +46,6 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
     let total_t0 = Instant::now();
     let mut week_ops = 0;
     let mut week_t0 = total_t0;
-    let mut week = 0;
 
     while let Ok(page) = rx.recv_async().await {
         for mut s in page.ops {
@@ -50,7 +60,8 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
                 let now = Instant::now();
 
                 log::info!(
-                    "done week {week:3 } ({:10 }): {week_ops:7 } ({:5.0 }/s) ops, {:5 }k total ({:5.0 }/s)",
+                    "done week {:3 } ({:10 }): {week_ops:7 } ({:5.0 }/s) ops, {:5 }k total ({:5.0 }/s)",
+                    current_week.map(|w| -w.n_ago()).unwrap_or(0),
                     current_week.unwrap_or(Week(0)).0,
                     (week_ops as f64) / (now - week_t0).as_secs_f64(),
                     total_ops / 1000,
@@ -62,7 +73,6 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
                 current_week = Some(op_week);
                 week_ops = 0;
                 week_t0 = now;
-                week += 1;
             }
             s.push('\n'); // hack
             log::trace!("writing: {s}");
@@ -76,7 +86,8 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
     encoder.shutdown().await?;
     let now = Instant::now();
     log::info!(
-        "done week {week:3 } ({:10 }): {week_ops:7 } ({:5.0 }/s) ops, {:5 }k total ({:5.0 }/s)",
+        "done week {:3 } ({:10 }): {week_ops:7 } ({:5.0 }/s) ops, {:5 }k total ({:5.0 }/s)",
+        current_week.map(|w| -w.n_ago()).unwrap_or(0),
         current_week.unwrap_or(Week(0)).0,
         (week_ops as f64) / (now - week_t0).as_secs_f64(),
         total_ops / 1000,
