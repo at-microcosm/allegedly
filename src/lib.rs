@@ -4,11 +4,13 @@ mod backfill;
 mod client;
 mod plc_pg;
 mod poll;
+mod weekly;
 
 pub use backfill::week_to_pages;
 pub use client::CLIENT;
 pub use plc_pg::Db;
-pub use poll::poll_upstream;
+pub use poll::{get_page, poll_upstream};
+pub use weekly::{Week, pages_to_weeks};
 
 pub type Dt = chrono::DateTime<chrono::Utc>;
 

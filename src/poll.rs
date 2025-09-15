@@ -18,7 +18,7 @@ pub enum GetPageError {
 /// we assume that the order will at least be deterministic: this may be unsound
 #[derive(Debug, PartialEq)]
 pub struct LastOp {
-    created_at: Dt,       // any op greater is definitely not duplicated
+    pub created_at: Dt,   // any op greater is definitely not duplicated
     pk: (String, String), // did, cid
 }
 
@@ -117,7 +117,14 @@ pub async fn poll_upstream(
             page.only_after_last(pl);
         }
         if !page.is_empty() {
-            dest.send_async(page).await?;
+            match dest.try_send(page) {
+                Ok(()) => {}
+                Err(flume::TrySendError::Full(page)) => {
+                    log::warn!("export: destination channel full, awaiting...");
+                    dest.send_async(page).await?;
+                }
+                e => e?,
+            };
         }
 
         prev_last = next_last.or(prev_last);
