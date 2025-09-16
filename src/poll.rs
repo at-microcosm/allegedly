@@ -8,9 +8,11 @@ const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Error)]
 pub enum GetPageError {
     #[error(transparent)]
-    ReqwestError(#[from] reqwest::Error),
+    Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
-    SerdeError(#[from] serde_json::Error),
+    ReqwestMiddleware(#[from] reqwest_middleware::Error),
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
 }
 
 /// ops are primary-keyed by (did, cid)
