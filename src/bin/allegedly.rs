@@ -1,4 +1,4 @@
-use allegedly::{Dt, bin_init, pages_to_weeks, poll_upstream};
+use allegedly::{Dt, FolderSource, HttpSource, backfill, bin_init, pages_to_weeks, poll_upstream};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use url::Url;
@@ -15,6 +15,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Use weekly bundled ops to get a complete directory mirror FAST
+    Backfill {
+        /// Remote URL prefix to fetch bundles from
+        #[arg(long)]
+        #[clap(default_value = "https://plc.t3.storage.dev/plc.directory/")]
+        http: Url,
+        /// Local folder to fetch bundles from (overrides `http`)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Parallel bundle fetchers
+        #[arg(long)]
+        #[clap(default_value = "4")]
+        source_workers: usize,
+    },
     /// Scrape a PLC server, collecting ops into weekly bundles
     ///
     /// Bundles are gzipped files named `<WEEK>.jsonl.gz` where WEEK is a unix
@@ -51,6 +65,31 @@ async fn main() {
     let args = Cli::parse();
 
     match args.command {
+        Commands::Backfill {
+            http,
+            dir,
+            source_workers,
+        } => {
+            let (tx, rx) = flume::bounded(1024); // big pages
+            tokio::task::spawn(async move {
+                if let Some(dir) = dir {
+                    log::info!("Reading weekly bundles from local folder {dir:?}");
+                    backfill(FolderSource(dir), tx, source_workers)
+                        .await
+                        .unwrap();
+                } else {
+                    log::info!("Fetching weekly bundles from from {http}");
+                    backfill(HttpSource(http), tx, source_workers)
+                        .await
+                        .unwrap();
+                }
+            });
+            loop {
+                for op in rx.recv_async().await.unwrap().ops {
+                    println!("{op}")
+                }
+            }
+        }
         Commands::Bundle {
             dest,
             after,

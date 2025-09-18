@@ -6,6 +6,7 @@ Allegedly can
 
 - Tail PLC ops to stdout: `allegedly tail | jq`
 - Export PLC ops to weekly gzipped bundles: `allegdly bundle --dest ./some-folder`
+- Dump bundled ops to stdout FAST: `allegedly backfill --source-workers 6 | pv -l > /ops-unordered.jsonl`
 
 (add `--help` to any command for more info about it)
 

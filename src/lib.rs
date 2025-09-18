@@ -6,17 +6,17 @@ mod plc_pg;
 mod poll;
 mod weekly;
 
-pub use backfill::week_to_pages;
+pub use backfill::backfill;
 pub use client::CLIENT;
 pub use plc_pg::Db;
 pub use poll::{get_page, poll_upstream};
-pub use weekly::{Week, pages_to_weeks};
+pub use weekly::{BundleSource, FolderSource, HttpSource, Week, pages_to_weeks, week_to_pages};
 
 pub type Dt = chrono::DateTime<chrono::Utc>;
 
 /// One page of PLC export
 ///
-/// Expected to have up to around 1000 lines of raw json ops
+/// plc.directory caps /export at 1000 ops; backfill tasks may send more in a page.
 #[derive(Debug)]
 pub struct ExportPage {
     pub ops: Vec<String>,

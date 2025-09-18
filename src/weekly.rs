@@ -1,21 +1,42 @@
-use crate::{Dt, ExportPage, Op};
+use crate::{CLIENT, Dt, ExportPage, Op};
+use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::write::GzipEncoder;
+use core::pin::pin;
+use std::future::Future;
 use std::path::PathBuf;
-use tokio::{fs::File, io::AsyncWriteExt};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
+};
+use tokio_stream::wrappers::LinesStream;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
+use url::Url;
 
-const WEEK_IN_SECONDS: i64 = 7 * 86400;
+const WEEK_IN_SECONDS: i64 = 7 * 86_400;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Week(i64);
 
 impl Week {
-    pub fn from_n(n: i64) -> Self {
+    pub const fn from_n(n: i64) -> Self {
         Self(n)
     }
     pub fn n_ago(&self) -> i64 {
         let Self(us) = self;
         let Self(cur) = chrono::Utc::now().into();
         (cur - us) / WEEK_IN_SECONDS
+    }
+    pub fn next(&self) -> Week {
+        Self(self.0 + WEEK_IN_SECONDS)
+    }
+    /// is the plc log for this week entirely outside the 72h nullification window
+    ///
+    /// plus one hour for safety (week must have ended > 73 hours ago)
+    pub fn is_immutable(&self) -> bool {
+        const HOUR_IN_SECONDS: i64 = 3600;
+        let now = chrono::Utc::now().timestamp();
+        let nullification_cutoff = now - (73 * HOUR_IN_SECONDS);
+        self.next().0 <= nullification_cutoff
     }
 }
 
@@ -31,6 +52,42 @@ impl From<Week> for Dt {
     fn from(week: Week) -> Dt {
         let Week(ts) = week;
         Dt::from_timestamp(ts, 0).expect("the week to be in valid range")
+    }
+}
+
+pub trait BundleSource: Clone {
+    fn reader_for(
+        &self,
+        week: Week,
+    ) -> impl Future<Output = anyhow::Result<impl AsyncRead + Send>> + Send;
+}
+
+#[derive(Debug, Clone)]
+pub struct FolderSource(pub PathBuf);
+impl BundleSource for FolderSource {
+    async fn reader_for(&self, week: Week) -> anyhow::Result<impl AsyncRead> {
+        let FolderSource(dir) = self;
+        let path = dir.join(format!("{}.jsonl.gz", week.0));
+        Ok(File::open(path).await?)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpSource(pub Url);
+impl BundleSource for HttpSource {
+    async fn reader_for(&self, week: Week) -> anyhow::Result<impl AsyncRead> {
+        use futures::TryStreamExt;
+        let HttpSource(base) = self;
+        let url = base.join(&format!("{}.jsonl.gz", week.0))?;
+        Ok(CLIENT
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes_stream()
+            .map_err(futures::io::Error::other)
+            .into_async_read()
+            .compat())
     }
 }
 
@@ -102,5 +159,22 @@ pub async fn pages_to_weeks(
         (total_ops as f64) / (now - total_t0).as_secs_f64(),
     );
 
+    Ok(())
+}
+
+pub async fn week_to_pages(
+    source: impl BundleSource,
+    week: Week,
+    dest: flume::Sender<ExportPage>,
+) -> anyhow::Result<()> {
+    use futures::TryStreamExt;
+    let decoder = GzipDecoder::new(BufReader::new(source.reader_for(week).await?));
+    let mut chunks = pin!(LinesStream::new(BufReader::new(decoder).lines()).try_chunks(10000));
+
+    while let Some(chunk) = chunks.try_next().await? {
+        let ops: Vec<String> = chunk.into_iter().collect();
+        let page = ExportPage { ops };
+        dest.send_async(page).await?;
+    }
     Ok(())
 }

@@ -2,7 +2,7 @@ use clap::Parser;
 use std::time::Duration;
 use url::Url;
 
-use allegedly::{Db, Dt, ExportPage, Op, bin_init, poll_upstream, week_to_pages};
+use allegedly::{Db, Dt, ExportPage, Op, bin_init, poll_upstream};
 
 const EXPORT_PAGE_QUEUE_SIZE: usize = 0; // rendezvous for now
 const WEEK_IN_SECONDS: u64 = 7 * 86400;
@@ -40,21 +40,22 @@ struct Args {
     postgres: String,
 }
 
-async fn bulk_backfill((upstream, epoch): (Url, u64), tx: flume::Sender<ExportPage>) {
+async fn bulk_backfill((_upstream, epoch): (Url, u64), _tx: flume::Sender<ExportPage>) {
     let immutable_cutoff = std::time::SystemTime::now() - Duration::from_secs((7 + 4) * 86400);
     let immutable_ts = (immutable_cutoff.duration_since(std::time::SystemTime::UNIX_EPOCH))
         .unwrap()
         .as_secs();
-    let immutable_week = (immutable_ts / WEEK_IN_SECONDS) * WEEK_IN_SECONDS;
-    let mut week = epoch;
-    let mut week_n = 0;
-    while week < immutable_week {
-        log::info!("backfilling week {week_n} ({week})");
-        let url = upstream.join(&format!("{week}.jsonl.gz")).unwrap();
-        week_to_pages(url, tx.clone()).await.unwrap();
-        week_n += 1;
-        week += WEEK_IN_SECONDS;
-    }
+    let _immutable_week = (immutable_ts / WEEK_IN_SECONDS) * WEEK_IN_SECONDS;
+    let _week = epoch;
+    let _week_n = 0;
+    todo!();
+    // while week < immutable_week {
+    //     log::info!("backfilling week {week_n} ({week})");
+    //     let url = upstream.join(&format!("{week}.jsonl.gz")).unwrap();
+    //     week_to_pages(url, tx.clone()).await.unwrap();
+    //     week_n += 1;
+    //     week += WEEK_IN_SECONDS;
+    // }
 }
 
 async fn export_upstream(
