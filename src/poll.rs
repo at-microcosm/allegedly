@@ -3,7 +3,8 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
+// plc.directory ratelimit on /export is 500 per 5 mins
+const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(600);
 
 #[derive(Debug, Error)]
 pub enum GetPageError {

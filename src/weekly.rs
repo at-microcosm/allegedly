@@ -34,7 +34,11 @@ impl From<Week> for Dt {
     }
 }
 
-pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> anyhow::Result<()> {
+pub async fn pages_to_weeks(
+    rx: flume::Receiver<ExportPage>,
+    dir: PathBuf,
+    clobber: bool,
+) -> anyhow::Result<()> {
     pub use std::time::Instant;
 
     // ...there is certainly a nicer way to write this
@@ -67,8 +71,12 @@ pub async fn pages_to_weeks(rx: flume::Receiver<ExportPage>, dir: PathBuf) -> an
                     total_ops / 1000,
                     (total_ops as f64) / (now - total_t0).as_secs_f64(),
                 );
-
-                let file = File::create(dir.join(format!("{}.jsonl.gz", op_week.0))).await?;
+                let path = dir.join(format!("{}.jsonl.gz", op_week.0));
+                let file = if clobber {
+                    File::create(path).await?
+                } else {
+                    File::create_new(path).await?
+                };
                 encoder = GzipEncoder::with_quality(file, async_compression::Level::Best);
                 current_week = Some(op_week);
                 week_ops = 0;
