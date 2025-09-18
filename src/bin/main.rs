@@ -1,6 +1,6 @@
+use allegedly::{Dt, bin_init, poll_upstream};
 use clap::{Parser, Subcommand};
 use url::Url;
-use allegedly::{Dt, bin_init, poll_upstream};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -19,7 +19,7 @@ enum Commands {
         /// Begin replay from a specific timestamp
         #[arg(long)]
         after: Option<Dt>,
-    }
+    },
 }
 
 #[tokio::main]
