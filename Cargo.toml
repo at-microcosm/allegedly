@@ -1,5 +1,7 @@
 [package]
 name = "allegedly"
+description = "public ledger tools and services (for the PLC)"
+license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 default-run = "allegedly"
