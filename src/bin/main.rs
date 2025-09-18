@@ -5,7 +5,7 @@ use url::Url;
 #[derive(Debug, Parser)]
 struct Cli {
     /// Upstream PLC server
-    #[arg(long, env)]
+    #[arg(short, long, env)]
     #[clap(default_value = "https://plc.directory")]
     upstream: Url,
     #[command(subcommand)]
@@ -17,7 +17,7 @@ enum Commands {
     /// Poll an upstream PLC server and log new ops to stdout
     Tail {
         /// Begin replay from a specific timestamp
-        #[arg(long)]
+        #[arg(short, long)]
         after: Option<Dt>,
     },
 }
