@@ -78,17 +78,7 @@ impl PageBoundaryState {
         };
 
         // and make sure all keys at this time are captured from the back
-        page.ops
-            .iter()
-            .rev()
-            .skip(1) // we alredy added the very last one
-            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
-                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
-            .take_while(|opr| opr.as_ref().map(|op| op.created_at == last_at).unwrap_or(false))
-            .for_each(|opr| {
-                let op = &opr.expect("any Errs were filtered by take_while");
-                me.keys_at.push(op.into());
-            });
+        me.capture_nth_last_at(page, last_at);
 
         Some(me)
     }
@@ -143,6 +133,11 @@ impl PageBoundaryState {
             assert_eq!(last_at, self.last_at, "time moved backwards on a page");
         }
         // and make sure all keys at this time are captured from the back
+        self.capture_nth_last_at(page, last_at);
+    }
+
+    /// walk backwards from 2nd last and collect keys until created_at changes
+    fn capture_nth_last_at(&mut self, page: &mut ExportPage, last_at: Dt) {
         page.ops
             .iter()
             .rev()
