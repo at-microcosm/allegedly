@@ -48,6 +48,21 @@ struct PageBoundaryState {
     keys_at: Vec<OpKey>, // expected to ~always be length one
 }
 
+// ok so this is silly.
+//
+// i think i had some idea that deferring parsing to later steps would make it
+// easier to do things like sometimes not parsing at all (where the output is
+// also json lines), and maybe avoid some memory shuffling.
+// but since the input already has to be split into lines, keeping them as line
+// strings is probably the worst option: space-inefficient, allows garbage, and
+// leads to, well, this impl.
+//
+// it almost could have been slick if the *original* was just reused, and the
+// parsed ops were just kind of on the side referencing into it, but i'm lazy
+// and didn't get it there.
+//
+// should unrefactor to make Op own its data again, parse (and deal with errors)
+// upfront, and probably greatly simplify everything downstream. simple.
 impl PageBoundaryState {
     fn new(page: &mut ExportPage) -> Option<Self> {
         // grab the very last op
