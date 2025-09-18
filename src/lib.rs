@@ -16,7 +16,7 @@ pub type Dt = chrono::DateTime<chrono::Utc>;
 
 /// One page of PLC export
 ///
-/// Not limited, but expected to have up to about 1000 lines
+/// Expected to have up to around 1000 lines of raw json ops
 #[derive(Debug)]
 pub struct ExportPage {
     pub ops: Vec<String>,
@@ -28,6 +28,9 @@ impl ExportPage {
     }
 }
 
+/// A fully-deserialized plc operation
+///
+/// including the plc's wrapping with timestmap and nullified state
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Op<'a> {
@@ -37,6 +40,22 @@ pub struct Op<'a> {
     pub nullified: bool,
     #[serde(borrow)]
     pub operation: &'a serde_json::value::RawValue,
+}
+
+/// Database primary key for an op
+#[derive(Debug, PartialEq)]
+pub struct OpKey {
+    pub did: String,
+    pub cid: String,
+}
+
+impl From<&Op<'_>> for OpKey {
+    fn from(Op { did, cid, .. }: &Op<'_>) -> Self {
+        Self {
+            did: did.to_string(),
+            cid: cid.to_string(),
+        }
+    }
 }
 
 pub fn bin_init(name: &str) {

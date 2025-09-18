@@ -1,4 +1,4 @@
-use crate::{CLIENT, Dt, ExportPage, Op};
+use crate::{CLIENT, Dt, ExportPage, Op, OpKey};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -42,29 +42,118 @@ impl From<Dt> for LastOp {
     }
 }
 
-impl ExportPage {
-    /// this is a (slightly flawed) op deduplicator
-    fn only_after_last(&mut self, last_op: &LastOp) {
-        loop {
-            let Some(s) = self.ops.first().cloned() else {
-                break;
+/// PLC
+struct PageBoundaryState {
+    last_at: Dt,
+    keys_at: Vec<OpKey>, // expected to ~always be length one
+}
+
+impl PageBoundaryState {
+    fn new(page: &mut ExportPage) -> Option<Self> {
+        // grab the very last op
+        let (last_at, last_key) = loop {
+            let Some(s) = page.ops.last().cloned() else {
+                // there are no ops left? oop. bail.
+                // last_at and existing keys remain in tact if there was no later op
+                return None;
             };
-            let Ok(op) = serde_json::from_str::<Op>(&s) else {
-                log::warn!(
-                    "deduplication failed op parsing ({s:?}), bailing for downstream to deal with."
-                );
-                break;
+            if s.is_empty() {
+                // annoying: trim off any trailing blank lines
+                page.ops.pop();
+                continue;
+            }
+            let Ok(op) = serde_json::from_str::<Op>(&s)
+                .inspect_err(|e| log::warn!("deduplication failed last op parsing ({s:?}: {e}), ignoring for downstream to deal with."))
+            else {
+                // doubly annoying: skip over trailing garbage??
+                continue;
             };
-            if op.created_at > last_op.created_at {
-                break;
-            }
-            log::trace!("dedup: dropping an op");
-            self.ops.remove(0);
-            if Into::<LastOp>::into(op) == *last_op {
-                log::trace!("dedup: found exact op, keeping all after here");
-                break;
-            }
+            break (op.created_at, Into::<OpKey>::into(&op));
+        };
+
+        // set initial state
+        let mut me = Self {
+            last_at,
+            keys_at: vec![last_key],
+        };
+
+        // and make sure all keys at this time are captured from the back
+        page.ops
+            .iter()
+            .rev()
+            .skip(1) // we alredy added the very last one
+            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
+                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
+            .take_while(|opr| opr.as_ref().map(|op| op.created_at == last_at).unwrap_or(false))
+            .for_each(|opr| {
+                let op = &opr.expect("any Errs were filtered by take_while");
+                me.keys_at.push(op.into());
+            });
+
+        Some(me)
+    }
+    fn apply_to_next(&mut self, page: &mut ExportPage) {
+        // walk ops forward, kicking previously-seen ops until created_at advances
+        let to_remove: Vec<usize> = page
+            .ops
+            .iter()
+            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
+                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
+            .enumerate()
+            .take_while(|(_, opr)| opr.as_ref().map(|op| op.created_at == self.last_at).unwrap_or(false))
+            .filter_map(|(i, opr)| {
+                if self.keys_at.contains(&(&opr.expect("any Errs were filtered by take_while")).into()) {
+                    Some(i)
+                } else { None }
+            })
+            .collect();
+
+        // actually remove them. last to first to indices don't shift
+        for dup_idx in to_remove.into_iter().rev() {
+            page.ops.remove(dup_idx);
         }
+
+        // grab the very last op
+        let (last_at, last_key) = loop {
+            let Some(s) = page.ops.last().cloned() else {
+                // there are no ops left? oop. bail.
+                // last_at and existing keys remain in tact if there was no later op
+                return;
+            };
+            if s.is_empty() {
+                // annoying: trim off any trailing blank lines
+                page.ops.pop();
+                continue;
+            }
+            let Ok(op) = serde_json::from_str::<Op>(&s)
+                .inspect_err(|e| log::warn!("deduplication failed last op parsing ({s:?}: {e}), ignoring for downstream to deal with."))
+            else {
+                // doubly annoying: skip over trailing garbage??
+                continue;
+            };
+            break (op.created_at, Into::<OpKey>::into(&op));
+        };
+
+        // reset state (as long as time actually moved forward on this page)
+        if last_at > self.last_at {
+            self.last_at = last_at;
+            self.keys_at = vec![last_key];
+        } else {
+            // weird cases: either time didn't move (fine...) or went backwards (not fine)
+            assert_eq!(last_at, self.last_at, "time moved backwards on a page");
+        }
+        // and make sure all keys at this time are captured from the back
+        page.ops
+            .iter()
+            .rev()
+            .skip(1) // we alredy added the very last one
+            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
+                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
+            .take_while(|opr| opr.as_ref().map(|op| op.created_at == last_at).unwrap_or(false))
+            .for_each(|opr| {
+                let op = &opr.expect("any Errs were filtered by take_while");
+                self.keys_at.push(op.into());
+            });
     }
 }
 
@@ -105,6 +194,7 @@ pub async fn poll_upstream(
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
     let mut prev_last: Option<LastOp> = after.map(Into::into);
+    let mut boundary_state: Option<PageBoundaryState> = None;
     loop {
         tick.tick().await;
 
@@ -115,8 +205,10 @@ pub async fn poll_upstream(
         };
 
         let (mut page, next_last) = get_page(url).await?;
-        if let Some(ref pl) = prev_last {
-            page.only_after_last(pl);
+        if let Some(ref mut state) = boundary_state {
+            state.apply_to_next(&mut page);
+        } else {
+            boundary_state = PageBoundaryState::new(&mut page);
         }
         if !page.is_empty() {
             match dest.try_send(page) {
