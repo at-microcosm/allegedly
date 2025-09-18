@@ -16,7 +16,7 @@ struct Cli {
 enum Commands {
     /// Poll an upstream PLC server and log new ops to stdout
     Tail {
-        /// Begin replay from a specific timestamp
+        /// Begin tailing from a specific timestamp for replay or wait-until
         #[arg(short, long)]
         after: Option<Dt>,
     },
