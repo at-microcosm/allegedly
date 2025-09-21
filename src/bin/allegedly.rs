@@ -1,4 +1,7 @@
-use allegedly::{Db, Dt, ExportPage, FolderSource, HttpSource, backfill, bin_init, pages_to_weeks, poll_upstream, write_bulk as pages_to_pg};
+use allegedly::{
+    Db, Dt, ExportPage, FolderSource, HttpSource, backfill, bin_init, pages_to_weeks,
+    poll_upstream, write_bulk as pages_to_pg,
+};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use url::Url;
@@ -25,9 +28,10 @@ enum Commands {
         #[arg(long)]
         dir: Option<PathBuf>,
         /// Parallel bundle fetchers
+        ///
+        /// Default: 4 for http fetches, 1 for local folder
         #[arg(long)]
-        #[clap(default_value = "4")]
-        source_workers: usize,
+        source_workers: Option<usize>,
         /// Bulk load into did-method-plc-compatible postgres instead of stdout
         ///
         /// Pass a postgres connection url like "postgresql://localhost:5432"
@@ -64,11 +68,12 @@ enum Commands {
 }
 
 async fn pages_to_stdout(rx: flume::Receiver<ExportPage>) -> Result<(), flume::RecvError> {
-    loop {
-        for op in rx.recv_async().await?.ops {
+    while let Ok(page) = rx.recv_async().await {
+        for op in page.ops {
             println!("{op}")
         }
     }
+    Ok(())
 }
 
 #[tokio::main]
@@ -84,22 +89,22 @@ async fn main() {
             source_workers,
             to_postgres,
         } => {
-            let (tx, rx) = flume::bounded(1024); // big pages
+            let (tx, rx) = flume::bounded(32); // big pages
             tokio::task::spawn(async move {
                 if let Some(dir) = dir {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
-                    backfill(FolderSource(dir), tx, source_workers)
+                    backfill(FolderSource(dir), tx, source_workers.unwrap_or(1))
                         .await
                         .unwrap();
                 } else {
                     log::info!("Fetching weekly bundles from from {http}");
-                    backfill(HttpSource(http), tx, source_workers)
+                    backfill(HttpSource(http), tx, source_workers.unwrap_or(4))
                         .await
                         .unwrap();
                 }
             });
             if let Some(url) = to_postgres {
-                let db = Db::new(url.as_str());
+                let db = Db::new(url.as_str()).await.unwrap();
                 pages_to_pg(db, rx).await.unwrap();
             } else {
                 pages_to_stdout(rx).await.unwrap();
@@ -122,7 +127,7 @@ async fn main() {
             let mut url = args.upstream;
             url.set_path("/export");
             let start_at = after.or_else(|| Some(chrono::Utc::now()));
-            let (tx, rx) = flume::bounded(0); // rendezvous, don't read ahead
+            let (tx, rx) = flume::bounded(1);
             tokio::task::spawn(async move { poll_upstream(start_at, url, tx).await.unwrap() });
             pages_to_stdout(rx).await.unwrap();
         }

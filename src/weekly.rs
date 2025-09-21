@@ -3,6 +3,7 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::write::GzipEncoder;
 use core::pin::pin;
 use std::future::Future;
+use std::ops::{Bound, RangeBounds};
 use std::path::PathBuf;
 use tokio::{
     fs::File,
@@ -14,29 +15,56 @@ use url::Url;
 
 const WEEK_IN_SECONDS: i64 = 7 * 86_400;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Week(i64);
 
 impl Week {
     pub const fn from_n(n: i64) -> Self {
         Self(n)
     }
+    pub fn range(r: impl RangeBounds<Week>) -> Vec<Self> {
+        let first = match r.start_bound() {
+            Bound::Included(week) => *week,
+            Bound::Excluded(week) => week.next(),
+            Bound::Unbounded => panic!("week range must have a defined start bound"),
+        };
+        let last = match r.end_bound() {
+            Bound::Included(week) => *week,
+            Bound::Excluded(week) => week.prev(),
+            Bound::Unbounded => Self(Self::nullification_cutoff()).prev(),
+        };
+        let mut out = Vec::new();
+        let mut current = first;
+        while current <= last {
+            out.push(current);
+            current = current.next();
+        }
+        out
+    }
     pub fn n_ago(&self) -> i64 {
-        let Self(us) = self;
-        let Self(cur) = chrono::Utc::now().into();
-        (cur - us) / WEEK_IN_SECONDS
+        let now = chrono::Utc::now().timestamp();
+        (now - self.0) / WEEK_IN_SECONDS
+    }
+    pub fn n_until(&self, other: Week) -> i64 {
+        let Self(until) = other;
+        (until - self.0) / WEEK_IN_SECONDS
     }
     pub fn next(&self) -> Week {
         Self(self.0 + WEEK_IN_SECONDS)
     }
-    /// is the plc log for this week entirely outside the 72h nullification window
+    pub fn prev(&self) -> Week {
+        Self(self.0 - WEEK_IN_SECONDS)
+    }
+    /// whether the plc log for this week outside the 72h nullification window
     ///
     /// plus one hour for safety (week must have ended > 73 hours ago)
     pub fn is_immutable(&self) -> bool {
+        self.next().0 <= Self::nullification_cutoff()
+    }
+    fn nullification_cutoff() -> i64 {
         const HOUR_IN_SECONDS: i64 = 3600;
         let now = chrono::Utc::now().timestamp();
-        let nullification_cutoff = now - (73 * HOUR_IN_SECONDS);
-        self.next().0 <= nullification_cutoff
+        now - (73 * HOUR_IN_SECONDS)
     }
 }
 
