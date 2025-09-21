@@ -92,7 +92,7 @@ pub async fn write_bulk(db: Db, pages: flume::Receiver<ExportPage>) -> Result<()
             cid text not null,
             operation jsonb not null,
             nullified boolean not null,
-            createdAt timestamptz not null
+            "createdAt" timestamptz not null
         )"#,
         &[],
     )
@@ -135,9 +135,38 @@ pub async fn write_bulk(db: Db, pages: flume::Receiver<ExportPage>) -> Result<()
     log::info!("copied in {n} rows");
 
     tx.commit().await?;
+    log::info!("copy in time: {:?}", t0.elapsed());
 
-    let dt = t0.elapsed();
-    log::info!("backfill time: {dt:?}");
+    log::info!("copying dids into plc table...");
+    let n = client
+        .execute(
+            r#"
+        INSERT INTO dids
+        SELECT distinct did FROM allegedly_backfill
+            ON CONFLICT do nothing"#,
+            &[],
+        )
+        .await?;
+    log::info!("{n} inserted; elapsed: {:?}", t0.elapsed());
+
+    log::info!("copying ops into plc table...");
+    let n = client
+        .execute(
+            r#"
+        INSERT INTO operations (did, cid, operation, nullified, "createdAt")
+        SELECT did, cid, operation, nullified, "createdAt" FROM allegedly_backfill
+            ON CONFLICT do nothing"#,
+            &[],
+        )
+        .await?;
+    log::info!("{n} inserted; elapsed: {:?}", t0.elapsed());
+
+    log::info!("clean up backfill table...");
+    client
+        .execute(r#"DROP TABLE allegedly_backfill"#, &[])
+        .await?;
+
+    log::info!("total backfill time: {:?}", t0.elapsed());
 
     Ok(())
 }

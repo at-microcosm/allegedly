@@ -37,6 +37,9 @@ enum Commands {
         /// Pass a postgres connection url like "postgresql://localhost:5432"
         #[arg(long)]
         to_postgres: Option<Url>,
+        /// Stop at the week ending before this date
+        #[arg(long)]
+        until: Option<Dt>,
     },
     /// Scrape a PLC server, collecting ops into weekly bundles
     ///
@@ -88,17 +91,18 @@ async fn main() {
             dir,
             source_workers,
             to_postgres,
+            until,
         } => {
             let (tx, rx) = flume::bounded(32); // big pages
             tokio::task::spawn(async move {
                 if let Some(dir) = dir {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
-                    backfill(FolderSource(dir), tx, source_workers.unwrap_or(1))
+                    backfill(FolderSource(dir), tx, source_workers.unwrap_or(1), until)
                         .await
                         .unwrap();
                 } else {
                     log::info!("Fetching weekly bundles from from {http}");
-                    backfill(HttpSource(http), tx, source_workers.unwrap_or(4))
+                    backfill(HttpSource(http), tx, source_workers.unwrap_or(4), until)
                         .await
                         .unwrap();
                 }

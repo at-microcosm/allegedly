@@ -8,9 +8,14 @@ pub async fn backfill(
     source: impl BundleSource + Send + 'static,
     dest: flume::Sender<ExportPage>,
     source_workers: usize,
+    until: Option<Dt>,
 ) -> anyhow::Result<()> {
     // queue up the week bundles that should be available
-    let weeks = Arc::new(Mutex::new(Week::range(FIRST_WEEK..)));
+    let weeks = Arc::new(Mutex::new(
+        until
+            .map(|u| Week::range(FIRST_WEEK..u.into()))
+            .unwrap_or(Week::range(FIRST_WEEK..)),
+    ));
     weeks.lock().await.reverse();
 
     let mut workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
