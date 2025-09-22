@@ -1,9 +1,10 @@
 use allegedly::{
-    Db, Dt, ExportPage, FolderSource, HttpSource, backfill, bin_init, pages_to_weeks,
-    poll_upstream, write_bulk as pages_to_pg,
+    Db, Dt, ExportPage, FolderSource, HttpSource, PageBoundaryState, backfill, backfill_to_pg,
+    bin_init, pages_to_pg, pages_to_weeks, poll_upstream,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use tokio::sync::oneshot;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -45,6 +46,9 @@ enum Commands {
         /// Stop at the week ending before this date
         #[arg(long)]
         until: Option<Dt>,
+        /// After the weekly imports, poll upstream until we're caught up
+        #[arg(long, action)]
+        catch_up: bool,
     },
     /// Scrape a PLC server, collecting ops into weekly bundles
     ///
@@ -75,13 +79,44 @@ enum Commands {
     },
 }
 
-async fn pages_to_stdout(rx: flume::Receiver<ExportPage>) -> Result<(), flume::RecvError> {
+async fn pages_to_stdout(
+    rx: flume::Receiver<ExportPage>,
+    notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
+) -> Result<(), flume::RecvError> {
+    let mut last_at = None;
     while let Ok(page) = rx.recv_async().await {
-        for op in page.ops {
-            println!("{op}")
+        for op in &page.ops {
+            println!("{op}");
+        }
+        if notify_last_at.is_some()
+            && let Some(s) = PageBoundaryState::new(&page)
+        {
+            last_at = last_at.filter(|&l| l >= s.last_at).or(Some(s.last_at));
         }
     }
+    if let Some(notify) = notify_last_at {
+        log::trace!("notifying last_at: {last_at:?}");
+        if notify.send(last_at).is_err() {
+            log::error!("receiver for last_at dropped, can't notify");
+        };
+    }
     Ok(())
+}
+
+/// page forwarder who drops its channels on receipt of a small page
+///
+/// PLC will return up to 1000 ops on a page, and returns full pages until it
+/// has caught up, so this is a (hacky?) way to stop polling once we're up.
+fn full_pages(rx: flume::Receiver<ExportPage>) -> flume::Receiver<ExportPage> {
+    let (tx, fwd) = flume::bounded(0);
+    tokio::task::spawn(async move {
+        while let Ok(page) = rx.recv_async().await
+            && page.ops.len() > 900
+        {
+            tx.send_async(page).await.unwrap();
+        }
+    });
+    fwd
 }
 
 #[tokio::main]
@@ -98,8 +133,9 @@ async fn main() {
             to_postgres,
             postgres_reset,
             until,
+            catch_up,
         } => {
-            let (tx, rx) = flume::bounded(32); // big pages
+            let (tx, rx) = flume::bounded(32); // these are big pages
             tokio::task::spawn(async move {
                 if let Some(dir) = dir {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
@@ -113,11 +149,47 @@ async fn main() {
                         .unwrap();
                 }
             });
-            if let Some(url) = to_postgres {
-                let db = Db::new(url.as_str()).await.unwrap();
-                pages_to_pg(db, rx, postgres_reset).await.unwrap();
+
+            // postgres writer will notify us as soon as the very last op's time is known
+            // so we can start catching up while pg is restoring indexes and stuff
+            let (notify_last_at, rx_last) = if catch_up {
+                let (tx, rx) = oneshot::channel();
+                (Some(tx), Some(rx))
             } else {
-                pages_to_stdout(rx).await.unwrap();
+                (None, None)
+            };
+
+            let to_postgres_url_bulk = to_postgres.clone();
+            let bulk_out_write = tokio::task::spawn(async move {
+                if let Some(ref url) = to_postgres_url_bulk {
+                    let db = Db::new(url.as_str()).await.unwrap();
+                    backfill_to_pg(db, postgres_reset, rx, notify_last_at)
+                        .await
+                        .unwrap();
+                } else {
+                    pages_to_stdout(rx, notify_last_at).await.unwrap();
+                }
+            });
+
+            if let Some(rx_last) = rx_last {
+                let mut upstream = args.upstream;
+                upstream.set_path("/export");
+                // wait until the time for `after` is known
+                let last_at = rx_last.await.unwrap();
+                log::info!("beginning catch-up from {last_at:?} while the writer finalizes stuff");
+                let (tx, rx) = flume::bounded(256);
+                tokio::task::spawn(
+                    async move { poll_upstream(last_at, upstream, tx).await.unwrap() },
+                );
+                bulk_out_write.await.unwrap();
+                log::info!("writing catch-up pages");
+                let full_pages = full_pages(rx);
+                if let Some(url) = to_postgres {
+                    let db = Db::new(url.as_str()).await.unwrap();
+                    pages_to_pg(db, full_pages).await.unwrap();
+                } else {
+                    pages_to_stdout(full_pages, None).await.unwrap();
+                }
             }
         }
         Commands::Bundle {
@@ -139,7 +211,7 @@ async fn main() {
             let start_at = after.or_else(|| Some(chrono::Utc::now()));
             let (tx, rx) = flume::bounded(1);
             tokio::task::spawn(async move { poll_upstream(start_at, url, tx).await.unwrap() });
-            pages_to_stdout(rx).await.unwrap();
+            pages_to_stdout(rx, None).await.unwrap();
         }
     }
 }

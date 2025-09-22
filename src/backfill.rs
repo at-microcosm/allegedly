@@ -1,5 +1,6 @@
 use crate::{BundleSource, Dt, ExportPage, Week, week_to_pages};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::{sync::Mutex, task::JoinSet};
 
 const FIRST_WEEK: Week = Week::from_n(1668643200);
@@ -20,22 +21,22 @@ pub async fn backfill(
 
     let mut workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
+    let t_step = Instant::now();
+    log::info!(
+        "fetching backfill for {} weeks with {source_workers} workers...",
+        weeks.lock().await.len()
+    );
+
     // spin up the fetchers to work in parallel
     for w in 0..source_workers {
         let weeks = weeks.clone();
         let dest = dest.clone();
         let source = source.clone();
         workers.spawn(async move {
-            log::trace!("about to get weeks...");
-
             while let Some(week) = weeks.lock().await.pop() {
-                log::trace!(
-                    "worker {w}: fetching week {} (-{})",
-                    Into::<Dt>::into(week).to_rfc3339(),
-                    week.n_ago(),
-                );
+                let when = Into::<Dt>::into(week).to_rfc3339();
+                log::trace!("worker {w}: fetching week {when} (-{})", week.n_ago());
                 week_to_pages(source.clone(), week, dest.clone()).await?;
-                log::trace!("week {}", Into::<Dt>::into(week).to_rfc3339());
             }
             log::info!("done with the weeks ig");
             Ok(())
@@ -44,10 +45,10 @@ pub async fn backfill(
 
     // TODO: handle missing/failed weeks
 
-    // wait for them to finish
+    // wait for the big backfill to finish
     while let Some(res) = workers.join_next().await {
         res??;
     }
-
+    log::info!("finished fetching backfill in {:?}", t_step.elapsed());
     Ok(())
 }

@@ -1,6 +1,7 @@
-use crate::{ExportPage, Op};
+use crate::{Dt, ExportPage, Op, PageBoundaryState};
 use std::pin::pin;
 use std::time::Instant;
+use tokio::sync::oneshot;
 use tokio_postgres::{
     Client, Error as PgError, NoTls,
     binary_copy::BinaryCopyInWriter,
@@ -71,6 +72,55 @@ impl Db {
     }
 }
 
+pub async fn pages_to_pg(db: Db, pages: flume::Receiver<ExportPage>) -> Result<(), PgError> {
+    let mut client = db.connect().await?;
+
+    let ops_stmt = client
+        .prepare(
+            r#"INSERT INTO operations (did, operation, cid, nullified, "createdAt")
+           VALUES ($1, $2, $3, $4, $5)"#,
+        )
+        .await?;
+    let did_stmt = client
+        .prepare(r#"INSERT INTO dids (did) VALUES ($1) ON CONFLICT do nothing"#)
+        .await?;
+
+    let t0 = Instant::now();
+    let mut ops_inserted = 0;
+    let mut dids_inserted = 0;
+
+    while let Ok(page) = pages.recv_async().await {
+        log::trace!("writing page with {} ops", page.ops.len());
+        let tx = client.transaction().await?;
+        for s in page.ops {
+            let Ok(op) = serde_json::from_str::<Op>(&s) else {
+                log::warn!("ignoring unparseable op {s:?}");
+                continue;
+            };
+            ops_inserted += tx
+                .execute(
+                    &ops_stmt,
+                    &[
+                        &op.did,
+                        &Json(op.operation),
+                        &op.cid,
+                        &op.nullified,
+                        &op.created_at,
+                    ],
+                )
+                .await?;
+            dids_inserted += tx.execute(&did_stmt, &[&op.did]).await?;
+        }
+        tx.commit().await?;
+    }
+
+    log::info!(
+        "no more pages. inserted {ops_inserted} ops and {dids_inserted} dids in {:?}",
+        t0.elapsed()
+    );
+    Ok(())
+}
+
 /// Dump rows into an empty operations table quickly
 ///
 /// you must run this after initializing the db with kysely migrations from the
@@ -84,16 +134,18 @@ impl Db {
 /// panics: if the operations or dids tables are not empty, unless reset is true
 ///
 /// recommended postgres setting: `max_wal_size=4GB` (or more)
-pub async fn write_bulk(
+pub async fn backfill_to_pg(
     db: Db,
-    pages: flume::Receiver<ExportPage>,
     reset: bool,
+    pages: flume::Receiver<ExportPage>,
+    notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
 ) -> Result<(), PgError> {
     let mut client = db.connect().await?;
 
     let t0 = Instant::now();
     let tx = client.transaction().await?;
-    tx.execute("SET LOCAL synchronous_commit = off", &[]).await?;
+    tx.execute("SET LOCAL synchronous_commit = off", &[])
+        .await?;
 
     let t_step = Instant::now();
     for table in ["operations", "dids"] {
@@ -142,9 +194,10 @@ pub async fn write_bulk(
         )
         .await?;
     let mut writer = pin!(BinaryCopyInWriter::new(sync, types));
+    let mut last_at = None;
     while let Ok(page) = pages.recv_async().await {
-        for s in page.ops {
-            let Ok(op) = serde_json::from_str::<Op>(&s) else {
+        for s in &page.ops {
+            let Ok(op) = serde_json::from_str::<Op>(s) else {
                 log::warn!("ignoring unparseable op: {s:?}");
                 continue;
             };
@@ -159,7 +212,20 @@ pub async fn write_bulk(
                 ])
                 .await?;
         }
+        if notify_last_at.is_some()
+            && let Some(s) = PageBoundaryState::new(&page)
+        {
+            last_at = last_at.filter(|&l| l >= s.last_at).or(Some(s.last_at));
+        }
     }
+
+    if let Some(notify) = notify_last_at {
+        log::trace!("notifying last_at: {last_at:?}");
+        if notify.send(last_at).is_err() {
+            log::error!("receiver for last_at dropped, can't notify");
+        };
+    }
+
     let n = writer.as_mut().finish().await?;
     log::trace!("COPY IN wrote {n} ops: {:?}", t_step.elapsed());
 

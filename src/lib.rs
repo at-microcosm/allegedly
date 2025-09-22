@@ -8,8 +8,8 @@ mod weekly;
 
 pub use backfill::backfill;
 pub use client::CLIENT;
-pub use plc_pg::{Db, write_bulk};
-pub use poll::{get_page, poll_upstream};
+pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
+pub use poll::{PageBoundaryState, get_page, poll_upstream};
 pub use weekly::{BundleSource, FolderSource, HttpSource, Week, pages_to_weeks, week_to_pages};
 
 pub type Dt = chrono::DateTime<chrono::Utc>;

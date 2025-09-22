@@ -45,8 +45,8 @@ impl From<Dt> for LastOp {
 
 /// PLC
 #[derive(Debug, PartialEq)]
-struct PageBoundaryState {
-    last_at: Dt,
+pub struct PageBoundaryState {
+    pub last_at: Dt,
     keys_at: Vec<OpKey>, // expected to ~always be length one
 }
 
@@ -66,7 +66,7 @@ struct PageBoundaryState {
 // should unrefactor to make Op own its data again, parse (and deal with errors)
 // upfront, and probably greatly simplify everything downstream. simple.
 impl PageBoundaryState {
-    fn new(page: &ExportPage) -> Option<Self> {
+    pub fn new(page: &ExportPage) -> Option<Self> {
         let mut skips = 0;
 
         // grab the very last op
