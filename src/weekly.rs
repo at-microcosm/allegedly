@@ -2,6 +2,7 @@ use crate::{CLIENT, Dt, ExportPage, Op};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::write::GzipEncoder;
 use core::pin::pin;
+use reqwest::Url;
 use std::future::Future;
 use std::ops::{Bound, RangeBounds};
 use std::path::PathBuf;
@@ -12,7 +13,6 @@ use tokio::{
 };
 use tokio_stream::wrappers::LinesStream;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
-use url::Url;
 
 const WEEK_IN_SECONDS: i64 = 7 * 86_400;
 

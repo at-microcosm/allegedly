@@ -1,8 +1,8 @@
 use crate::{CLIENT, Dt, ExportPage, Op, OpKey};
+use reqwest::Url;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use url::Url;
 
 // plc.directory ratelimit on /export is 500 per 5 mins
 const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(600);

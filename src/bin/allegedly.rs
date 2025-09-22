@@ -3,9 +3,9 @@ use allegedly::{
     bin_init, pages_to_pg, pages_to_weeks, poll_upstream,
 };
 use clap::{Parser, Subcommand};
+use reqwest::Url;
 use std::{path::PathBuf, time::Instant};
 use tokio::sync::{mpsc, oneshot};
-use url::Url;
 
 #[derive(Debug, Parser)]
 struct Cli {

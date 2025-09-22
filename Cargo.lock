@@ -47,7 +47,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
- "url",
 ]
 
 [[package]]
