@@ -3,8 +3,8 @@ use allegedly::{
     bin_init, pages_to_pg, pages_to_weeks, poll_upstream,
 };
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use tokio::sync::oneshot;
+use std::{path::PathBuf, time::Instant};
+use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -80,11 +80,11 @@ enum Commands {
 }
 
 async fn pages_to_stdout(
-    rx: flume::Receiver<ExportPage>,
+    mut rx: mpsc::Receiver<ExportPage>,
     notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
-) -> Result<(), flume::RecvError> {
+) -> anyhow::Result<()> {
     let mut last_at = None;
-    while let Ok(page) = rx.recv_async().await {
+    while let Some(page) = rx.recv().await {
         for op in &page.ops {
             println!("{op}");
         }
@@ -107,13 +107,13 @@ async fn pages_to_stdout(
 ///
 /// PLC will return up to 1000 ops on a page, and returns full pages until it
 /// has caught up, so this is a (hacky?) way to stop polling once we're up.
-fn full_pages(rx: flume::Receiver<ExportPage>) -> flume::Receiver<ExportPage> {
-    let (tx, fwd) = flume::bounded(0);
+fn full_pages(mut rx: mpsc::Receiver<ExportPage>) -> mpsc::Receiver<ExportPage> {
+    let (tx, fwd) = mpsc::channel(1);
     tokio::task::spawn(async move {
-        while let Ok(page) = rx.recv_async().await
+        while let Some(page) = rx.recv().await
             && page.ops.len() > 900
         {
-            tx.send_async(page).await.unwrap();
+            tx.send(page).await.unwrap();
         }
     });
     fwd
@@ -125,6 +125,7 @@ async fn main() {
 
     let args = Cli::parse();
 
+    let t0 = Instant::now();
     match args.command {
         Commands::Backfill {
             http,
@@ -135,7 +136,7 @@ async fn main() {
             until,
             catch_up,
         } => {
-            let (tx, rx) = flume::bounded(32); // these are big pages
+            let (tx, rx) = mpsc::channel(32); // these are big pages
             tokio::task::spawn(async move {
                 if let Some(dir) = dir {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
@@ -177,7 +178,7 @@ async fn main() {
                 // wait until the time for `after` is known
                 let last_at = rx_last.await.unwrap();
                 log::info!("beginning catch-up from {last_at:?} while the writer finalizes stuff");
-                let (tx, rx) = flume::bounded(256);
+                let (tx, rx) = mpsc::channel(256); // these are small pages
                 tokio::task::spawn(
                     async move { poll_upstream(last_at, upstream, tx).await.unwrap() },
                 );
@@ -199,7 +200,7 @@ async fn main() {
         } => {
             let mut url = args.upstream;
             url.set_path("/export");
-            let (tx, rx) = flume::bounded(32); // read ahead if gzip stalls for some reason
+            let (tx, rx) = mpsc::channel(32); // read ahead if gzip stalls for some reason
             tokio::task::spawn(async move { poll_upstream(Some(after), url, tx).await.unwrap() });
             log::trace!("ensuring output directory exists");
             std::fs::create_dir_all(&dest).unwrap();
@@ -209,9 +210,10 @@ async fn main() {
             let mut url = args.upstream;
             url.set_path("/export");
             let start_at = after.or_else(|| Some(chrono::Utc::now()));
-            let (tx, rx) = flume::bounded(1);
+            let (tx, rx) = mpsc::channel(1);
             tokio::task::spawn(async move { poll_upstream(start_at, url, tx).await.unwrap() });
             pages_to_stdout(rx, None).await.unwrap();
         }
     }
+    log::info!("whew, {:?}. goodbye!", t0.elapsed());
 }

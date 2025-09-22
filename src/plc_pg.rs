@@ -1,7 +1,7 @@
 use crate::{Dt, ExportPage, Op, PageBoundaryState};
 use std::pin::pin;
 use std::time::Instant;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_postgres::{
     Client, Error as PgError, NoTls,
     binary_copy::BinaryCopyInWriter,
@@ -72,7 +72,7 @@ impl Db {
     }
 }
 
-pub async fn pages_to_pg(db: Db, pages: flume::Receiver<ExportPage>) -> Result<(), PgError> {
+pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> Result<(), PgError> {
     let mut client = db.connect().await?;
 
     let ops_stmt = client
@@ -89,7 +89,7 @@ pub async fn pages_to_pg(db: Db, pages: flume::Receiver<ExportPage>) -> Result<(
     let mut ops_inserted = 0;
     let mut dids_inserted = 0;
 
-    while let Ok(page) = pages.recv_async().await {
+    while let Some(page) = pages.recv().await {
         log::trace!("writing page with {} ops", page.ops.len());
         let tx = client.transaction().await?;
         for s in page.ops {
@@ -137,7 +137,7 @@ pub async fn pages_to_pg(db: Db, pages: flume::Receiver<ExportPage>) -> Result<(
 pub async fn backfill_to_pg(
     db: Db,
     reset: bool,
-    pages: flume::Receiver<ExportPage>,
+    mut pages: mpsc::Receiver<ExportPage>,
     notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
 ) -> Result<(), PgError> {
     let mut client = db.connect().await?;
@@ -195,7 +195,7 @@ pub async fn backfill_to_pg(
         .await?;
     let mut writer = pin!(BinaryCopyInWriter::new(sync, types));
     let mut last_at = None;
-    while let Ok(page) = pages.recv_async().await {
+    while let Some(page) = pages.recv().await {
         for s in &page.ops {
             let Ok(op) = serde_json::from_str::<Op>(s) else {
                 log::warn!("ignoring unparseable op: {s:?}");

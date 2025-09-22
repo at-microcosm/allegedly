@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
+    sync::mpsc,
 };
 use tokio_stream::wrappers::LinesStream;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -120,7 +121,7 @@ impl BundleSource for HttpSource {
 }
 
 pub async fn pages_to_weeks(
-    rx: flume::Receiver<ExportPage>,
+    mut rx: mpsc::Receiver<ExportPage>,
     dir: PathBuf,
     clobber: bool,
 ) -> anyhow::Result<()> {
@@ -136,7 +137,7 @@ pub async fn pages_to_weeks(
     let mut week_ops = 0;
     let mut week_t0 = total_t0;
 
-    while let Ok(page) = rx.recv_async().await {
+    while let Some(page) = rx.recv().await {
         for mut s in page.ops {
             let Ok(op) = serde_json::from_str::<Op>(&s)
                 .inspect_err(|e| log::error!("failed to parse plc op, ignoring: {e}"))
@@ -193,7 +194,7 @@ pub async fn pages_to_weeks(
 pub async fn week_to_pages(
     source: impl BundleSource,
     week: Week,
-    dest: flume::Sender<ExportPage>,
+    dest: mpsc::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
     use futures::TryStreamExt;
     let decoder = GzipDecoder::new(BufReader::new(source.reader_for(week).await?));
@@ -202,7 +203,7 @@ pub async fn week_to_pages(
     while let Some(chunk) = chunks.try_next().await? {
         let ops: Vec<String> = chunk.into_iter().collect();
         let page = ExportPage { ops };
-        dest.send_async(page).await?;
+        dest.send(page).await?;
     }
     Ok(())
 }

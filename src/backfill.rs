@@ -1,13 +1,16 @@
 use crate::{BundleSource, Dt, ExportPage, Week, week_to_pages};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+};
 
 const FIRST_WEEK: Week = Week::from_n(1668643200);
 
 pub async fn backfill(
     source: impl BundleSource + Send + 'static,
-    dest: flume::Sender<ExportPage>,
+    dest: mpsc::Sender<ExportPage>,
     source_workers: usize,
     until: Option<Dt>,
 ) -> anyhow::Result<()> {

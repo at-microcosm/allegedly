@@ -1,6 +1,7 @@
 use crate::{CLIENT, Dt, ExportPage, Op, OpKey};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use url::Url;
 
 // plc.directory ratelimit on /export is 500 per 5 mins
@@ -209,7 +210,7 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageE
 pub async fn poll_upstream(
     after: Option<Dt>,
     base: Url,
-    dest: flume::Sender<ExportPage>,
+    dest: mpsc::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
     let mut prev_last: Option<LastOp> = after.map(Into::into);
@@ -232,9 +233,9 @@ pub async fn poll_upstream(
         if !page.is_empty() {
             match dest.try_send(page) {
                 Ok(()) => {}
-                Err(flume::TrySendError::Full(page)) => {
+                Err(mpsc::error::TrySendError::Full(page)) => {
                     log::warn!("export: destination channel full, awaiting...");
-                    dest.send_async(page).await?;
+                    dest.send(page).await?;
                 }
                 e => e?,
             };
