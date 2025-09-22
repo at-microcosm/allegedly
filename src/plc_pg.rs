@@ -70,6 +70,21 @@ impl Db {
 
         Ok(client)
     }
+
+    pub async fn get_latest(&self) -> Result<Option<Dt>, PgError> {
+        let client = self.connect().await?;
+        let dt: Option<Dt> = client
+            .query_opt(
+                r#"SELECT "createdAt"
+                           FROM operations
+                          ORDER BY "createdAt" DESC
+                          LIMIT 1"#,
+                &[],
+            )
+            .await?
+            .map(|row| row.get(0));
+        Ok(dt)
+    }
 }
 
 pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> Result<(), PgError> {
@@ -78,7 +93,8 @@ pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> Resul
     let ops_stmt = client
         .prepare(
             r#"INSERT INTO operations (did, operation, cid, nullified, "createdAt")
-           VALUES ($1, $2, $3, $4, $5)"#,
+               VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT do nothing"#,
         )
         .await?;
     let did_stmt = client

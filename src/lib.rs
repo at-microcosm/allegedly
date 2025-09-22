@@ -2,12 +2,14 @@ use serde::Deserialize;
 
 mod backfill;
 mod client;
+mod mirror;
 mod plc_pg;
 mod poll;
 mod weekly;
 
 pub use backfill::backfill;
 pub use client::CLIENT;
+pub use mirror::serve;
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
 pub use poll::{PageBoundaryState, get_page, poll_upstream};
 pub use weekly::{BundleSource, FolderSource, HttpSource, Week, pages_to_weeks, week_to_pages};
@@ -58,11 +60,8 @@ impl From<&Op<'_>> for OpKey {
     }
 }
 
-pub fn bin_init(name: &str) {
-    use env_logger::{Builder, Env};
-    Builder::from_env(Env::new().filter_or("RUST_LOG", "info")).init();
-
-    log::info!(
+pub fn logo(name: &str) -> String {
+    format!(
         r"
 
     \    |  |                         |  |
@@ -70,6 +69,19 @@ pub fn bin_init(name: &str) {
  _/  _\ _| _| \___| \__, | \___| \__,_| _| \_, |    (v{})
                      ____|                  __/
 ",
-        env!("CARGO_PKG_VERSION")
-    );
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+pub fn bin_init(name: &str) {
+    if std::env::var_os("RUST_LOG").is_none() {
+        unsafe { std::env::set_var("RUST_LOG", "info") };
+    }
+    let filter = tracing_subscriber::EnvFilter::from_default_env();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .init();
+
+    log::info!("{}", logo(name));
 }

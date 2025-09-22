@@ -1,10 +1,10 @@
 use allegedly::{
     Db, Dt, ExportPage, FolderSource, HttpSource, PageBoundaryState, backfill, backfill_to_pg,
-    bin_init, pages_to_pg, pages_to_weeks, poll_upstream,
+    bin_init, pages_to_pg, pages_to_weeks, poll_upstream, serve,
 };
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use reqwest::Url;
-use std::{path::PathBuf, time::Instant};
+use std::{net::SocketAddr, path::PathBuf, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Parser)]
@@ -71,6 +71,19 @@ enum Commands {
         #[arg(long, action)]
         clobber: bool,
     },
+    /// Wrap a did-method-plc server, syncing upstream and blocking op submits
+    Mirror {
+        /// the wrapped did-method-plc server
+        #[arg(long, env)]
+        wrap: Url,
+        /// the wrapped did-method-plc server's database (write access required)
+        #[arg(long, env)]
+        wrap_pg: Url,
+        /// wrapping server listen address
+        #[arg(short, long, env)]
+        #[clap(default_value = "127.0.0.1:8000")]
+        bind: SocketAddr,
+    },
     /// Poll an upstream PLC server and log new ops to stdout
     Tail {
         /// Begin tailing from a specific timestamp for replay or wait-until
@@ -121,9 +134,10 @@ fn full_pages(mut rx: mpsc::Receiver<ExportPage>) -> mpsc::Receiver<ExportPage> 
 
 #[tokio::main]
 async fn main() {
-    bin_init("main");
-
     let args = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let name = matches.subcommand().map(|(name, _)| name).unwrap_or("???");
+    bin_init(name);
 
     let t0 = Instant::now();
     match args.command {
@@ -205,6 +219,37 @@ async fn main() {
             log::trace!("ensuring output directory exists");
             std::fs::create_dir_all(&dest).unwrap();
             pages_to_weeks(rx, dest, clobber).await.unwrap();
+        }
+        Commands::Mirror {
+            wrap,
+            wrap_pg,
+            bind,
+        } => {
+            let db = Db::new(wrap_pg.as_str()).await.unwrap();
+            let latest = db
+                .get_latest()
+                .await
+                .unwrap()
+                .expect("there to be at least one op in the db. did you backfill?");
+
+            let (tx, rx) = mpsc::channel(2);
+            // upstream poller
+            tokio::task::spawn(async move {
+                log::info!("starting poll reader...");
+                let mut url = args.upstream;
+                url.set_path("/export");
+                tokio::task::spawn(
+                    async move { poll_upstream(Some(latest), url, tx).await.unwrap() },
+                );
+            });
+            // db writer
+            let poll_db = db.clone();
+            tokio::task::spawn(async move {
+                log::info!("starting db writer...");
+                pages_to_pg(poll_db, rx).await.unwrap();
+            });
+
+            serve(wrap, bind).await.unwrap();
         }
         Commands::Tail { after } => {
             let mut url = args.upstream;
