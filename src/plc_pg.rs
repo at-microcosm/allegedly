@@ -93,6 +93,7 @@ pub async fn write_bulk(
 
     let t0 = Instant::now();
     let tx = client.transaction().await?;
+    tx.execute("SET LOCAL synchronous_commit = off", &[]).await?;
 
     let t_step = Instant::now();
     for table in ["operations", "dids"] {
