@@ -10,9 +10,9 @@ Allegedly can
 - Wrap the reference PLC server and run it as a mirror:
 
     ```bash
-    allegedly mirror \
-      --bind 0.0.0.0:8000 \
-      --wrap http://127.0.0.1:3000 \
+    allegedly --upstream "https://plc.directory" mirror \
+      --bind "0.0.0.0:8000" \
+      --wrap "http://127.0.0.1:3000" \
       --wrap-pg "postgresql://postgres:postgres@localhost:5432/postgres"
    ```
 
