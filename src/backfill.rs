@@ -26,16 +26,16 @@ pub async fn backfill(
         let dest = dest.clone();
         let source = source.clone();
         workers.spawn(async move {
-            log::info!("about to get weeks...");
+            log::trace!("about to get weeks...");
 
             while let Some(week) = weeks.lock().await.pop() {
-                log::info!(
+                log::trace!(
                     "worker {w}: fetching week {} (-{})",
                     Into::<Dt>::into(week).to_rfc3339(),
                     week.n_ago(),
                 );
                 week_to_pages(source.clone(), week, dest.clone()).await?;
-                log::info!("done a week");
+                log::trace!("week {}", Into::<Dt>::into(week).to_rfc3339());
             }
             log::info!("done with the weeks ig");
             Ok(())

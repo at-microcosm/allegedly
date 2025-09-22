@@ -37,6 +37,11 @@ enum Commands {
         /// Pass a postgres connection url like "postgresql://localhost:5432"
         #[arg(long)]
         to_postgres: Option<Url>,
+        /// Delete all operations from the postgres db before starting
+        ///
+        /// only used if `--to-postgres` is present
+        #[arg(long, action)]
+        postgres_reset: bool,
         /// Stop at the week ending before this date
         #[arg(long)]
         until: Option<Dt>,
@@ -91,6 +96,7 @@ async fn main() {
             dir,
             source_workers,
             to_postgres,
+            postgres_reset,
             until,
         } => {
             let (tx, rx) = flume::bounded(32); // big pages
@@ -109,7 +115,7 @@ async fn main() {
             });
             if let Some(url) = to_postgres {
                 let db = Db::new(url.as_str()).await.unwrap();
-                pages_to_pg(db, rx).await.unwrap();
+                pages_to_pg(db, rx, postgres_reset).await.unwrap();
             } else {
                 pages_to_stdout(rx).await.unwrap();
             }
