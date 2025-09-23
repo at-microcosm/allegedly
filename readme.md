@@ -1,6 +1,6 @@
 # Allegedly
 
-Some [public ledger](https://github.com/did-method-plc/did-method-plc) server tools and services
+Some [public ledger](https://github.com/did-method-plc/did-method-plc) tools and services for servers
 
 Allegedly can
 
@@ -35,3 +35,10 @@ to install the latest from source:
     ```bash
     cargo install --path . --bin allegedly
     ```
+
+
+## license
+
+This work is dual-licensed under MIT and Apache 2.0. You can choose between one of them if you use this work.
+
+`SPDX-License-Identifier: MIT OR Apache-2.0`
