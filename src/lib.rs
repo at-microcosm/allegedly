@@ -5,6 +5,7 @@ mod client;
 mod mirror;
 mod plc_pg;
 mod poll;
+mod ratelimit;
 mod weekly;
 
 pub use backfill::backfill;
@@ -12,6 +13,7 @@ pub use client::CLIENT;
 pub use mirror::serve;
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
 pub use poll::{PageBoundaryState, get_page, poll_upstream};
+pub use ratelimit::GovernorMiddleware;
 pub use weekly::{BundleSource, FolderSource, HttpSource, Week, pages_to_weeks, week_to_pages};
 
 pub type Dt = chrono::DateTime<chrono::Utc>;

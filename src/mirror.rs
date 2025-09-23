@@ -1,4 +1,5 @@
-use crate::logo;
+use crate::{GovernorMiddleware, logo};
+use futures::TryStreamExt;
 use poem::{
     EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get, handler,
     http::{StatusCode, Uri},
@@ -7,8 +8,7 @@ use poem::{
     web::Data,
 };
 use reqwest::{Client, Url};
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 #[derive(Debug, Clone)]
 struct State {
@@ -73,14 +73,24 @@ async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResp
             log::error!("upstream req fail: {e}");
             Error::from_string(failed_to_reach_wrapped(), StatusCode::BAD_GATEWAY)
         })?;
-    let mut res = Response::default();
-    upstream_res.headers().iter().for_each(|(k, v)| {
-        res.headers_mut().insert(k, v.to_owned());
-    });
-    res.set_status(upstream_res.status());
-    res.set_version(upstream_res.version());
-    res.set_body(upstream_res.bytes().await.unwrap());
-    Ok(res)
+
+    let http_res: poem::http::Response<reqwest::Body> = upstream_res.into();
+    let (parts, reqw_body) = http_res.into_parts();
+
+    let parts = poem::ResponseParts {
+        status: parts.status,
+        version: parts.version,
+        headers: parts.headers,
+        extensions: parts.extensions,
+    };
+
+    let body = http_body_util::BodyDataStream::new(reqw_body)
+        .map_err(|e| std::io::Error::other(Box::new(e)));
+
+    Ok(Response::from_parts(
+        parts,
+        poem::Body::from_bytes_stream(body),
+    ))
 }
 
 #[handler]
@@ -107,6 +117,7 @@ pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Resul
         .with(AddData::new(state))
         .with(Cors::new().allow_credentials(false))
         .with(Compression::new())
+        .with(GovernorMiddleware::per_minute(3000).unwrap())
         .with(CatchPanic::new())
         .with(Tracing);
 
