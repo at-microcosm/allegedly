@@ -18,15 +18,20 @@ Allegedly can
 
 (add `--help` to any command for more info about it)
 
-also can:
-
-- Copy ops to postgres for a mirror running the [reference typescript implementation](https://github.com/did-method-plc/did-method-plc)
-
 
 ## install
 
-for now you'll need rust installed locally. after cloning, run
-
 ```bash
-cargo install --path . --bin allegedly
+cargo install allegedly
 ```
+
+the version on crates might be behind while new features are under development.
+to install the latest from source:
+
+- make sure you have rust/rustup set up
+- clone the repo
+- install
+
+    ```bash
+    cargo install --path . --bin allegedly
+    ```
