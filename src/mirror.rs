@@ -2,7 +2,7 @@ use crate::{GovernorMiddleware, logo};
 use futures::TryStreamExt;
 use poem::{
     EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get, handler,
-    http::{StatusCode, Uri},
+    http::StatusCode,
     listener::TcpListener,
     middleware::{AddData, CatchPanic, Compression, Cors, Tracing},
     web::Data,
@@ -94,9 +94,19 @@ async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResp
 }
 
 #[handler]
-async fn nope(uri: &Uri) -> Result<impl IntoResponse> {
-    log::info!("ha nope, {uri:?}");
-    Ok(())
+async fn nope(Data(State { upstream, .. }): Data<&State>) -> (StatusCode, String) {
+    (
+        StatusCode::BAD_REQUEST,
+        format!(
+            r#"{}
+
+Sorry, this server does not accept POST requests.
+
+You may wish to try upstream: {upstream}
+"#,
+            logo("mirror (nope)")
+        ),
+    )
 }
 
 pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Result<()> {
