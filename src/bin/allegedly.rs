@@ -234,9 +234,9 @@ async fn main() {
 
             let (tx, rx) = mpsc::channel(2);
             // upstream poller
+            let mut url = args.upstream.clone();
             tokio::task::spawn(async move {
                 log::info!("starting poll reader...");
-                let mut url = args.upstream;
                 url.set_path("/export");
                 tokio::task::spawn(
                     async move { poll_upstream(Some(latest), url, tx).await.unwrap() },
@@ -249,7 +249,7 @@ async fn main() {
                 pages_to_pg(poll_db, rx).await.unwrap();
             });
 
-            serve(wrap, bind).await.unwrap();
+            serve(&args.upstream, wrap, bind).await.unwrap();
         }
         Commands::Tail { after } => {
             let mut url = args.upstream;

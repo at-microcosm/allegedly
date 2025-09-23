@@ -14,11 +14,49 @@ use std::time::Duration;
 struct State {
     client: Client,
     plc: Url,
+    upstream: Url,
 }
 
 #[handler]
-fn hello() -> String {
-    logo("mirror")
+fn hello(Data(State { upstream, .. }): Data<&State>) -> String {
+    format!(
+        r#"{}
+
+This is a PLC[1] mirror running Allegedly[2] in mirror mode. Allegedly synchronizes and proxies to a downstream PLC reference server instance[3] (why?[4]).
+
+
+Configured upstream:
+
+    {upstream}
+
+
+Available APIs:
+
+    - All PLC GET requests [5].
+    - Rejects POSTs. This is a mirror.
+
+    try `GET /{{did}}` to resolve an identity
+
+
+[1] https://web.plc.directory
+[2] https://tangled.org/@microcosm.blue/Allegedly
+[3] https://github.com/did-method-plc/did-method-plc
+[4] https://updates.microcosm.blue/3lz7nwvh4zc2u
+[5] https://web.plc.directory/api/redoc
+
+"#,
+        logo("mirror")
+    )
+}
+
+fn failed_to_reach_wrapped() -> String {
+    format!(
+        r#"{}
+
+Failed to reach the wrapped reference PLC server. Sorry.
+"#,
+        logo("mirror 502 :( ")
+    )
 }
 
 #[handler]
@@ -33,7 +71,7 @@ async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResp
         .await
         .map_err(|e| {
             log::error!("upstream req fail: {e}");
-            Error::from_string("request to plc server failed", StatusCode::BAD_GATEWAY)
+            Error::from_string(failed_to_reach_wrapped(), StatusCode::BAD_GATEWAY)
         })?;
     let mut res = Response::default();
     upstream_res.headers().iter().for_each(|(k, v)| {
@@ -51,12 +89,17 @@ async fn nope(uri: &Uri) -> Result<impl IntoResponse> {
     Ok(())
 }
 
-pub async fn serve(plc: Url, bind: SocketAddr) -> std::io::Result<()> {
-    let client = Client::builder()
+pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Result<()> {
+    let wrapped_req_client = Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .unwrap();
-    let state = State { client, plc };
+
+    let state = State {
+        client: wrapped_req_client,
+        plc,
+        upstream: upstream.clone(),
+    };
 
     let app = Route::new()
         .at("/", get(hello))
@@ -66,5 +109,6 @@ pub async fn serve(plc: Url, bind: SocketAddr) -> std::io::Result<()> {
         .with(Compression::new())
         .with(CatchPanic::new())
         .with(Tracing);
+
     Server::new(TcpListener::bind(bind)).run(app).await
 }
