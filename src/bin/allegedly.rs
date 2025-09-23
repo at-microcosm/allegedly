@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug, Parser)]
 struct Cli {
     /// Upstream PLC server
-    #[arg(short, long, env)]
+    #[arg(short, long, env = "ALLEGEDLY_UPSTREAM")]
     #[clap(default_value = "https://plc.directory")]
     upstream: Url,
     #[command(subcommand)]
@@ -74,13 +74,13 @@ enum Commands {
     /// Wrap a did-method-plc server, syncing upstream and blocking op submits
     Mirror {
         /// the wrapped did-method-plc server
-        #[arg(long, env)]
+        #[arg(long, env = "ALLEGEDLY_WRAP")]
         wrap: Url,
         /// the wrapped did-method-plc server's database (write access required)
-        #[arg(long, env)]
+        #[arg(long, env = "ALLEGEDLY_WRAP_PG")]
         wrap_pg: Url,
         /// wrapping server listen address
-        #[arg(short, long, env)]
+        #[arg(short, long, env = "ALLEGEDLY_BIND")]
         #[clap(default_value = "127.0.0.1:8000")]
         bind: SocketAddr,
     },
