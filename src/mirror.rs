@@ -1,4 +1,4 @@
-use crate::{GovernorMiddleware, logo};
+use crate::{GovernorMiddleware, UA, logo};
 use futures::TryStreamExt;
 use governor::Quota;
 use poem::{
@@ -6,14 +6,15 @@ use poem::{
     http::StatusCode,
     listener::TcpListener,
     middleware::{AddData, CatchPanic, Compression, Cors, Tracing},
-    web::Data,
+    web::{Data, Json},
 };
 use reqwest::{Client, Url};
 use std::{net::SocketAddr, time::Duration};
 
 #[derive(Debug, Clone)]
 struct State {
-    client: Client,
+    upstream_client: Client,
+    wrapped_client: Client,
     plc: Url,
     upstream: Url,
 }
@@ -60,12 +61,77 @@ Failed to reach the wrapped reference PLC server. Sorry.
     )
 }
 
+async fn plc_status(url: &Url, client: &Client) -> (bool, serde_json::Value) {
+    use serde_json::json;
+
+    let mut url = url.clone();
+    url.set_path("/_health");
+
+    let Ok(response) = client.get(url).send().await else {
+        return (false, json!({"error": "cannot reach plc server"}));
+    };
+
+    let status = response.status();
+
+    let Ok(text) = response.text().await else {
+        return (false, json!({"error": "failed to read response body"}));
+    };
+
+    let body = match serde_json::from_str(&text) {
+        Ok(json) => json,
+        Err(_) => serde_json::Value::String(text.to_string()),
+    };
+
+    if status.is_success() {
+        (true, body)
+    } else {
+        (
+            false,
+            json!({
+                "error": "non-ok status",
+                "status": status.as_str(),
+                "status_code": status.as_u16(),
+                "response": body,
+            }),
+        )
+    }
+}
+
+#[handler]
+async fn health(
+    Data(State {
+        plc,
+        wrapped_client,
+        upstream,
+        upstream_client,
+    }): Data<&State>,
+) -> impl IntoResponse {
+    let mut overall_status = StatusCode::OK;
+    let (ok, wrapped_status) = plc_status(plc, wrapped_client).await;
+    if !ok {
+        overall_status = StatusCode::BAD_GATEWAY;
+    }
+    let (ok, upstream_status) = plc_status(upstream, upstream_client).await;
+    if !ok {
+        overall_status = StatusCode::BAD_GATEWAY;
+    }
+    (
+        overall_status,
+        Json(serde_json::json!({
+            "server": "allegedly (mirror)",
+            "version": env!("CARGO_PKG_VERSION"),
+            "wrapped_plc": wrapped_status,
+            "upstream_plc": upstream_status,
+        })),
+    )
+}
+
 #[handler]
 async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResponse> {
     let mut target = state.plc.clone();
     target.set_path(req.uri().path());
     let upstream_res = state
-        .client
+        .upstream_client
         .get(target)
         .headers(req.headers().clone())
         .send()
@@ -111,19 +177,26 @@ You may wish to try upstream: {upstream}
 }
 
 pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Result<()> {
-    let wrapped_req_client = Client::builder()
+    let wrapped_client = Client::builder()
         .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let upstream_client = Client::builder()
+        .user_agent(UA)
+        .timeout(Duration::from_secs(6))
         .build()
         .unwrap();
 
     let state = State {
-        client: wrapped_req_client,
+        wrapped_client,
+        upstream_client,
         plc,
         upstream: upstream.clone(),
     };
 
     let app = Route::new()
         .at("/", get(hello))
+        .at("/_health", get(health))
         .at("/:any", get(proxy).post(nope))
         .with(AddData::new(state))
         .with(Cors::new().allow_credentials(false))

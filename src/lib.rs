@@ -9,7 +9,7 @@ mod ratelimit;
 mod weekly;
 
 pub use backfill::backfill;
-pub use client::CLIENT;
+pub use client::{CLIENT, UA};
 pub use mirror::serve;
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
 pub use poll::{PageBoundaryState, get_page, poll_upstream};
