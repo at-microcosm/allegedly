@@ -13,8 +13,7 @@ use std::{net::SocketAddr, time::Duration};
 
 #[derive(Debug, Clone)]
 struct State {
-    upstream_client: Client,
-    wrapped_client: Client,
+    client: Client,
     plc: Url,
     upstream: Url,
 }
@@ -67,7 +66,7 @@ async fn plc_status(url: &Url, client: &Client) -> (bool, serde_json::Value) {
     let mut url = url.clone();
     url.set_path("/_health");
 
-    let Ok(response) = client.get(url).send().await else {
+    let Ok(response) = client.get(url).timeout(Duration::from_secs(3)).send().await else {
         return (false, json!({"error": "cannot reach plc server"}));
     };
 
@@ -101,17 +100,16 @@ async fn plc_status(url: &Url, client: &Client) -> (bool, serde_json::Value) {
 async fn health(
     Data(State {
         plc,
-        wrapped_client,
+        client,
         upstream,
-        upstream_client,
     }): Data<&State>,
 ) -> impl IntoResponse {
     let mut overall_status = StatusCode::OK;
-    let (ok, wrapped_status) = plc_status(plc, wrapped_client).await;
+    let (ok, wrapped_status) = plc_status(plc, client).await;
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
-    let (ok, upstream_status) = plc_status(upstream, upstream_client).await;
+    let (ok, upstream_status) = plc_status(upstream, client).await;
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
@@ -131,8 +129,9 @@ async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResp
     let mut target = state.plc.clone();
     target.set_path(req.uri().path());
     let upstream_res = state
-        .upstream_client
+        .client
         .get(target)
+        .timeout(Duration::from_secs(3)) // should be low latency to wrapped server
         .headers(req.headers().clone())
         .send()
         .await
@@ -177,19 +176,15 @@ You may wish to try upstream: {upstream}
 }
 
 pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Result<()> {
-    let wrapped_client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .unwrap();
-    let upstream_client = Client::builder()
+    // not using crate CLIENT: don't want the retries etc
+    let client = Client::builder()
         .user_agent(UA)
-        .timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(10)) // fallback
         .build()
         .unwrap();
 
     let state = State {
-        wrapped_client,
-        upstream_client,
+        client,
         plc,
         upstream: upstream.clone(),
     };
