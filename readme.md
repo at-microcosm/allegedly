@@ -27,7 +27,7 @@ Allegedly can
       --upstream "https://plc.directory" \
       --wrap "http://127.0.0.1:3000" \
       --acme-domain "plc.wtf" \
-      --acme-cache-dir ./acme-cache \
+      --acme-cache-path ./acme-cache \
       --acme-directory-url "https://acme-staging-v02.api.letsencrypt.org/directory"
     ```
 

@@ -38,6 +38,8 @@ enum Commands {
         /// Pass a postgres connection url like "postgresql://localhost:5432"
         #[arg(long)]
         to_postgres: Option<Url>,
+        /// Cert for postgres (if needed)
+        postgres_cert: Option<PathBuf>,
         /// Delete all operations from the postgres db before starting
         ///
         /// only used if `--to-postgres` is present
@@ -79,6 +81,8 @@ enum Commands {
         /// the wrapped did-method-plc server's database (write access required)
         #[arg(long, env = "ALLEGEDLY_WRAP_PG")]
         wrap_pg: Url,
+        /// path to tls cert for the wrapped postgres db, if needed
+        wrap_pg_cert: Option<PathBuf>,
         /// wrapping server listen address
         #[arg(short, long, env = "ALLEGEDLY_BIND")]
         #[clap(default_value = "127.0.0.1:8000")]
@@ -166,6 +170,7 @@ async fn main() {
             dir,
             source_workers,
             to_postgres,
+            postgres_cert,
             postgres_reset,
             until,
             catch_up,
@@ -195,9 +200,10 @@ async fn main() {
             };
 
             let to_postgres_url_bulk = to_postgres.clone();
+            let pg_cert = postgres_cert.clone();
             let bulk_out_write = tokio::task::spawn(async move {
                 if let Some(ref url) = to_postgres_url_bulk {
-                    let db = Db::new(url.as_str()).await.unwrap();
+                    let db = Db::new(url.as_str(), pg_cert).await.unwrap();
                     backfill_to_pg(db, postgres_reset, rx, notify_last_at)
                         .await
                         .unwrap();
@@ -220,7 +226,7 @@ async fn main() {
                 log::info!("writing catch-up pages");
                 let full_pages = full_pages(rx);
                 if let Some(url) = to_postgres {
-                    let db = Db::new(url.as_str()).await.unwrap();
+                    let db = Db::new(url.as_str(), postgres_cert).await.unwrap();
                     pages_to_pg(db, full_pages).await.unwrap();
                 } else {
                     pages_to_stdout(full_pages, None).await.unwrap();
@@ -243,12 +249,13 @@ async fn main() {
         Commands::Mirror {
             wrap,
             wrap_pg,
+            wrap_pg_cert,
             bind,
             acme_domain,
             acme_cache_path,
             acme_directory_url,
         } => {
-            let db = Db::new(wrap_pg.as_str()).await.unwrap();
+            let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await.unwrap();
             let latest = db
                 .get_latest()
                 .await

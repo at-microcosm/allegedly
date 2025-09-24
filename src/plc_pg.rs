@@ -1,4 +1,7 @@
 use crate::{Dt, ExportPage, Op, PageBoundaryState};
+use native_tls::{Certificate, TlsConnector};
+use postgres_native_tls::MakeTlsConnector;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
@@ -9,27 +12,54 @@ use tokio_postgres::{
     types::{Json, Type},
 };
 
+fn get_tls(cert: PathBuf) -> MakeTlsConnector {
+    let cert = std::fs::read(cert).unwrap();
+    let cert = Certificate::from_pem(&cert).unwrap();
+    let connector = TlsConnector::builder()
+        .add_root_certificate(cert)
+        .build()
+        .unwrap();
+    MakeTlsConnector::new(connector)
+}
+
 /// a little tokio-postgres helper
 ///
 /// it's clone for easiness. it doesn't share any resources underneath after
 /// cloning at all so it's not meant for
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Db {
     pg_uri: String,
+    cert: Option<MakeTlsConnector>,
 }
 
 impl Db {
-    pub async fn new(pg_uri: &str) -> Result<Self, anyhow::Error> {
+    pub async fn new(pg_uri: &str, cert: Option<PathBuf>) -> Result<Self, anyhow::Error> {
         // we're going to interact with did-method-plc's database, so make sure
         // it's what we expect: check for db migrations.
         log::trace!("checking migrations...");
-        let (client, connection) = connect(pg_uri, NoTls).await?;
-        let connection_task = tokio::task::spawn(async move {
-            connection
-                .await
-                .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                .unwrap();
-        });
+
+        let connector = cert.map(get_tls);
+
+        let (client, connection_task) = if let Some(ref connector) = connector {
+            let (client, connection) = connect(pg_uri, connector.clone()).await?;
+            let task = tokio::task::spawn(async move {
+                connection
+                    .await
+                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
+                    .unwrap();
+            });
+            (client, task)
+        } else {
+            let (client, connection) = connect(pg_uri, NoTls).await?;
+            let task = tokio::task::spawn(async move {
+                connection
+                    .await
+                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
+                    .unwrap();
+            });
+            (client, task)
+        };
+
         let migrations: Vec<String> = client
             .query("SELECT name FROM kysely_migration ORDER BY name", &[])
             .await?
@@ -52,21 +82,37 @@ impl Db {
 
         Ok(Self {
             pg_uri: pg_uri.to_string(),
+            cert: connector,
         })
     }
 
     pub async fn connect(&self) -> Result<Client, PgError> {
         log::trace!("connecting postgres...");
-        let (client, connection) = connect(&self.pg_uri, NoTls).await?;
+        let client = if let Some(ref connector) = self.cert {
+            let (client, connection) = connect(&self.pg_uri, connector.clone()).await?;
 
-        // send the connection away to do the actual communication work
-        // apparently the connection will complete when the client drops
-        tokio::task::spawn(async move {
-            connection
-                .await
-                .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                .unwrap();
-        });
+            // send the connection away to do the actual communication work
+            // apparently the connection will complete when the client drops
+            tokio::task::spawn(async move {
+                connection
+                    .await
+                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
+                    .unwrap();
+            });
+            client
+        } else {
+            let (client, connection) = connect(&self.pg_uri, NoTls).await?;
+
+            // send the connection away to do the actual communication work
+            // apparently the connection will complete when the client drops
+            tokio::task::spawn(async move {
+                connection
+                    .await
+                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
+                    .unwrap();
+            });
+            client
+        };
 
         Ok(client)
     }
