@@ -53,6 +53,34 @@ to install the latest from source:
     ```
 
 
+## future improvements
+
+### existing stuff
+
+- signals and shutdown handling
+- monitoring of the various tasks
+- health check pings
+- expose metrics/tracing
+- read-only flag for mirror wrapper
+- bundle: write directly to s3-compatible object storage
+- helpers for automating periodic `bundle` runs
+
+
+### new things
+
+- experimental: websocket version of /export
+- experimental: accept writes by forwarding them upstream
+- experimental: serve a tlog
+- experimental: embed a log database directly for fast and efficient mirroring
+- experimental: support multiple upstreams?
+
+- [ ] new command todo: `zip` or `check` or `diff`: compare two plc logs over some time range
+- [ ] new command to consider: `scatter` or something: broadcast plc writes to multiple upstreams
+
+
+if you have an idea for a new command, [open a request](https://tangled.org/@microcosm.blue/Allegedly/issues/new)!
+
+
 ## license
 
 This work is dual-licensed under MIT and Apache 2.0. You can choose between one of them if you use this work.
