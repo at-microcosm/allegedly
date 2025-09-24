@@ -1,82 +1,85 @@
 use crate::logo;
 
 use governor::{
-    Quota, RateLimiter,
+    NotUntil, Quota, RateLimiter,
     clock::{Clock, DefaultClock},
     state::keyed::DefaultKeyedStateStore,
 };
 use poem::{Endpoint, Middleware, Request, Response, Result, http::StatusCode};
 use std::{
-    convert::TryInto, error::Error, net::IpAddr, num::NonZeroU32, sync::Arc, sync::LazyLock,
+    convert::TryInto,
+    net::{IpAddr, Ipv6Addr},
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
 static CLOCK: LazyLock<DefaultClock> = LazyLock::new(DefaultClock::default);
+
+const IP6_64_MASK: Ipv6Addr = Ipv6Addr::from_bits(0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000);
+type IP6_56 = [u8; 7];
+type IP6_48 = [u8; 6];
+
+fn scale_quota(quota: Quota, factor: u32) -> Option<Quota> {
+    let period = quota.replenish_interval() / factor;
+    let burst = quota
+        .burst_size()
+        .checked_mul(factor.try_into().unwrap())
+        .unwrap();
+    Quota::with_period(period).map(|q| q.allow_burst(burst))
+}
+
+#[derive(Debug)]
+struct IpLimiters {
+    per_ip: RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>,
+    ip6_56: RateLimiter<IP6_56, DefaultKeyedStateStore<IP6_56>, DefaultClock>,
+    ip6_48: RateLimiter<IP6_48, DefaultKeyedStateStore<IP6_48>, DefaultClock>,
+}
+
+impl IpLimiters {
+    pub fn new(quota: Quota) -> Self {
+        Self {
+            per_ip: RateLimiter::keyed(quota),
+            ip6_56: RateLimiter::keyed(scale_quota(quota, 8).unwrap()),
+            ip6_48: RateLimiter::keyed(scale_quota(quota, 256).unwrap()),
+        }
+    }
+    pub fn check_key(&self, ip: IpAddr) -> Result<(), Duration> {
+        let asdf = |n: NotUntil<_>| n.wait_time_from(CLOCK.now());
+        match ip {
+            addr @ IpAddr::V4(_) => self.per_ip.check_key(&addr).map_err(asdf),
+            IpAddr::V6(a) => {
+                // always check all limiters
+                let check_ip = self
+                    .per_ip
+                    .check_key(&IpAddr::V6(a & IP6_64_MASK))
+                    .map_err(asdf);
+                let check_56 = self
+                    .ip6_56
+                    .check_key(a.octets()[..7].try_into().unwrap())
+                    .map_err(asdf);
+                let check_48 = self
+                    .ip6_48
+                    .check_key(a.octets()[..6].try_into().unwrap())
+                    .map_err(asdf);
+                check_ip.and(check_56).and(check_48)
+            }
+        }
+    }
+}
 
 /// Once the rate limit has been reached, the middleware will respond with
 /// status code 429 (too many requests) and a `Retry-After` header with the amount
 /// of time that needs to pass before another request will be allowed.
 #[derive(Debug, Clone)]
 pub struct GovernorMiddleware {
-    limiter: Arc<RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>>,
+    limiters: Arc<IpLimiters>,
 }
 
 impl GovernorMiddleware {
-    /// Constructs a rate-limiting middleware from a [`Duration`] that allows one request in the given time interval.
-    ///
-    /// If the time interval is zero, returns `None`.
-    #[must_use]
-    pub fn with_period(duration: Duration) -> Option<Self> {
-        Some(Self {
-            limiter: Arc::new(RateLimiter::<IpAddr, _, _>::keyed(Quota::with_period(
-                duration,
-            )?)),
-        })
-    }
-
-    /// Constructs a rate-limiting middleware that allows a specified number of requests every second.
-    ///
-    /// Returns an error if `times` can't be converted into a [`NonZeroU32`].
-    pub fn per_second<T>(times: T) -> Result<Self>
-    where
-        T: TryInto<NonZeroU32>,
-        T::Error: Error + Send + Sync + 'static,
-    {
-        Ok(Self {
-            limiter: Arc::new(RateLimiter::<IpAddr, _, _>::keyed(Quota::per_second(
-                times.try_into().unwrap(), // TODO
-            ))),
-        })
-    }
-
-    /// Constructs a rate-limiting middleware that allows a specified number of requests every minute.
-    ///
-    /// Returns an error if `times` can't be converted into a [`NonZeroU32`].
-    pub fn per_minute<T>(times: T) -> Result<Self>
-    where
-        T: TryInto<NonZeroU32>,
-        T::Error: Error + Send + Sync + 'static,
-    {
-        Ok(Self {
-            limiter: Arc::new(RateLimiter::<IpAddr, _, _>::keyed(Quota::per_minute(
-                times.try_into().unwrap(), // TODO
-            ))),
-        })
-    }
-
-    /// Constructs a rate-limiting middleware that allows a specified number of requests every hour.
-    ///
-    /// Returns an error if `times` can't be converted into a [`NonZeroU32`].
-    pub fn per_hour<T>(times: T) -> Result<Self>
-    where
-        T: TryInto<NonZeroU32>,
-        T::Error: Error + Send + Sync + 'static,
-    {
-        Ok(Self {
-            limiter: Arc::new(RateLimiter::<IpAddr, _, _>::keyed(Quota::per_hour(
-                times.try_into().unwrap(), // TODO
-            ))),
-        })
+    pub fn new(quota: Quota) -> Self {
+        Self {
+            limiters: Arc::new(IpLimiters::new(quota)),
+        }
     }
 }
 
@@ -85,14 +88,14 @@ impl<E: Endpoint> Middleware<E> for GovernorMiddleware {
     fn transform(&self, ep: E) -> Self::Output {
         GovernorMiddlewareImpl {
             ep,
-            limiter: self.limiter.clone(),
+            limiters: self.limiters.clone(),
         }
     }
 }
 
 pub struct GovernorMiddlewareImpl<E> {
     ep: E,
-    limiter: Arc<RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>>,
+    limiters: Arc<IpLimiters>,
 }
 
 impl<E: Endpoint> Endpoint for GovernorMiddlewareImpl<E> {
@@ -107,13 +110,13 @@ impl<E: Endpoint> Endpoint for GovernorMiddlewareImpl<E> {
 
         log::trace!("remote: {remote}");
 
-        match self.limiter.check_key(&remote) {
+        match self.limiters.check_key(remote) {
             Ok(_) => {
                 log::debug!("allowing remote {remote}");
                 self.ep.call(req).await
             }
-            Err(negative) => {
-                let wait_time = negative.wait_time_from(CLOCK.now()).as_secs();
+            Err(d) => {
+                let wait_time = d.as_secs();
 
                 log::debug!("rate limit exceeded for {remote}, quota reset in {wait_time}s");
 

@@ -1,5 +1,6 @@
 use crate::{GovernorMiddleware, logo};
 use futures::TryStreamExt;
+use governor::Quota;
 use poem::{
     EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get, handler,
     http::StatusCode,
@@ -127,7 +128,9 @@ pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Resul
         .with(AddData::new(state))
         .with(Cors::new().allow_credentials(false))
         .with(Compression::new())
-        .with(GovernorMiddleware::per_minute(3000).unwrap())
+        .with(GovernorMiddleware::new(Quota::per_minute(
+            3000.try_into().unwrap(),
+        )))
         .with(CatchPanic::new())
         .with(Tracing);
 
