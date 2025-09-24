@@ -7,16 +7,32 @@ Allegedly can
 - Tail PLC ops to stdout: `allegedly tail | jq`
 - Export PLC ops to weekly gzipped bundles: `allegdly bundle --dest ./some-folder`
 - Dump bundled ops to stdout FAST: `allegedly backfill --source-workers 6 | pv -l > /ops-unordered.jsonl`
-- Wrap the reference PLC server and run it as a mirror:
+- Wrap the reference PLC server and run it as a mirror, copying ops from upstream:
 
     ```bash
-    export ALLEGEDLY_WRAP_PG="postgresql://user:pass@pg-host:5432/plc-db"
-    allegedly --upstream "https://plc.directory" mirror \
-      --bind "0.0.0.0:8000" \
-      --wrap "http://127.0.0.1:3000"
-   ```
+    allegedly mirror \
+      --wrap "http://127.0.0.1:3000" \
+      --wrap-pg "postgresql://user:pass@pg-host:5432/plc-db"
+    ```
 
-(add `--help` to any command for more info about it)
+- Wrap a plc server, maximalist edition:
+
+    ```bash
+    # put sensitive values in environment so they don't leak via process name.
+    export ALLEGEDLY_WRAP_PG="postgresql://user:pass@pg-host:5432/plc-db"
+
+    # sudo to bind :80 + :443 for acme tls, but it's better to give user net cap.
+    # will try to autoprovision cert for "plc.wtf" from letsencrypt staging.
+    sudo allegedly mirror \
+      --upstream "https://plc.directory" \
+      --wrap "http://127.0.0.1:3000" \
+      --acme-domain "plc.wtf" \
+      --acme-cache-dir ./acme-cache \
+      --acme-directory-url "https://acme-staging-v02.api.letsencrypt.org/directory"
+    ```
+
+
+add `--help` to any command for more info about it
 
 
 ## install

@@ -230,6 +230,8 @@ pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Res
                 auto_cert = auto_cert.domain(domain);
             }
             let auto_cert = auto_cert.build().expect("acme config to build");
+
+            run_insecure_notice();
             run(app, TcpListener::bind("0.0.0.0:443").acme(auto_cert)).await
         }
         ListenConf::Bind(addr) => run(app, TcpListener::bind(addr)).await,
@@ -245,4 +247,30 @@ where
         .name("allegedly (mirror)")
         .run(app)
         .await
+}
+
+/// kick off a tiny little server on a tokio task to tell people to use 443
+fn run_insecure_notice() {
+    #[handler]
+    fn oop_plz_be_secure() -> (StatusCode, String) {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                r#"{}
+
+You probably want to change your request to use HTTPS instead of HTTP.
+"#,
+                logo("mirror (tls on 443 please)")
+            ),
+        )
+    }
+
+    let app = Route::new().at("/", get(oop_plz_be_secure)).with(Tracing);
+    let listener = TcpListener::bind("0.0.0.0:80");
+    tokio::task::spawn(async move {
+        Server::new(listener)
+            .name("allegedly (mirror:80 helper)")
+            .run(app)
+            .await
+    });
 }
