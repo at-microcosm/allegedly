@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, LazyLock},
     time::Duration,
 };
+use tokio::sync::oneshot;
 
 static CLOCK: LazyLock<DefaultClock> = LazyLock::new(DefaultClock::default);
 
@@ -70,15 +71,44 @@ impl IpLimiters {
 /// Once the rate limit has been reached, the middleware will respond with
 /// status code 429 (too many requests) and a `Retry-After` header with the amount
 /// of time that needs to pass before another request will be allowed.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GovernorMiddleware {
+    #[allow(dead_code)]
+    stop_on_drop: oneshot::Sender<()>,
     limiters: Arc<IpLimiters>,
 }
 
 impl GovernorMiddleware {
+    /// Limit request rates
+    ///
+    /// a little gross but this spawns a tokio task for housekeeping:
+    /// https://docs.rs/governor/latest/governor/struct.RateLimiter.html#keyed-rate-limiters---housekeeping
     pub fn new(quota: Quota) -> Self {
+        let limiters = Arc::new(IpLimiters::new(quota));
+        let (stop_on_drop, mut stopped) = oneshot::channel();
+        tokio::task::spawn({
+            let limiters = limiters.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => break,
+                        _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+                    };
+                    log::debug!(
+                        "limiter sizes before housekeeping: {}/ip {}/v6_56 {}/v6_48",
+                        limiters.per_ip.len(),
+                        limiters.ip6_56.len(),
+                        limiters.ip6_48.len(),
+                    );
+                    limiters.per_ip.retain_recent();
+                    limiters.ip6_56.retain_recent();
+                    limiters.ip6_48.retain_recent();
+                }
+            }
+        });
         Self {
-            limiters: Arc::new(IpLimiters::new(quota)),
+            stop_on_drop,
+            limiters,
         }
     }
 }
