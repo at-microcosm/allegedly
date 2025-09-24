@@ -1,6 +1,6 @@
 use allegedly::{
-    Db, Dt, ExportPage, FolderSource, HttpSource, PageBoundaryState, backfill, backfill_to_pg,
-    bin_init, pages_to_pg, pages_to_weeks, poll_upstream, serve,
+    Db, Dt, ExportPage, FolderSource, HttpSource, ListenConf, PageBoundaryState, backfill,
+    backfill_to_pg, bin_init, pages_to_pg, pages_to_weeks, poll_upstream, serve,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use reqwest::Url;
@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug, Parser)]
 struct Cli {
     /// Upstream PLC server
-    #[arg(short, long, env = "ALLEGEDLY_UPSTREAM")]
+    #[arg(short, long, global = true, env = "ALLEGEDLY_UPSTREAM")]
     #[clap(default_value = "https://plc.directory")]
     upstream: Url,
     #[command(subcommand)]
@@ -83,6 +83,26 @@ enum Commands {
         #[arg(short, long, env = "ALLEGEDLY_BIND")]
         #[clap(default_value = "127.0.0.1:8000")]
         bind: SocketAddr,
+        /// obtain a certificate from letsencrypt
+        ///
+        /// for now this will force listening on all interfaces at :80 and :443
+        /// (:80 will serve an "https required" error, *will not* redirect)
+        #[arg(
+            long,
+            conflicts_with("bind"),
+            requires("acme_cache_path"),
+            env = "ALLEGEDLY_ACME_DOMAIN"
+        )]
+        acme_domain: Vec<String>,
+        /// which local directory to keep the letsencrypt certs in
+        #[arg(long, requires("acme_domain"), env = "ALLEGEDLY_ACME_CACHE_PATH")]
+        acme_cache_path: Option<PathBuf>,
+        /// which public acme directory to use
+        ///
+        /// eg. letsencrypt staging: "https://acme-staging-v02.api.letsencrypt.org/directory"
+        #[arg(long, requires("acme_domain"), env = "ALLEGEDLY_ACME_DIRECTORY_URL")]
+        #[clap(default_value = "https://acme-v02.api.letsencrypt.org/directory")]
+        acme_directory_url: Url,
     },
     /// Poll an upstream PLC server and log new ops to stdout
     Tail {
@@ -224,6 +244,9 @@ async fn main() {
             wrap,
             wrap_pg,
             bind,
+            acme_domain,
+            acme_cache_path,
+            acme_directory_url,
         } => {
             let db = Db::new(wrap_pg.as_str()).await.unwrap();
             let latest = db
@@ -249,7 +272,17 @@ async fn main() {
                 pages_to_pg(poll_db, rx).await.unwrap();
             });
 
-            serve(&args.upstream, wrap, bind).await.unwrap();
+            let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
+                (_, false, Some(cache_path)) => ListenConf::Acme {
+                    domains: acme_domain,
+                    cache_path,
+                    directory_url: acme_directory_url.to_string(),
+                },
+                (bind, true, None) => ListenConf::Bind(bind),
+                (_, _, _) => unreachable!(),
+            };
+
+            serve(&args.upstream, wrap, listen_conf).await.unwrap();
         }
         Commands::Tail { after } => {
             let mut url = args.upstream;

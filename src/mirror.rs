@@ -2,14 +2,15 @@ use crate::{GovernorMiddleware, UA, logo};
 use futures::TryStreamExt;
 use governor::Quota;
 use poem::{
-    EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get, handler,
+    Endpoint, EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get,
+    handler,
     http::StatusCode,
-    listener::TcpListener,
+    listener::{Listener, TcpListener, acme::AutoCert},
     middleware::{AddData, CatchPanic, Compression, Cors, Tracing},
     web::{Data, Json},
 };
 use reqwest::{Client, Url};
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 #[derive(Debug, Clone)]
 struct State {
@@ -175,7 +176,17 @@ You may wish to try upstream: {upstream}
     )
 }
 
-pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Result<()> {
+#[derive(Debug)]
+pub enum ListenConf {
+    Acme {
+        domains: Vec<String>,
+        cache_path: PathBuf,
+        directory_url: String,
+    },
+    Bind(SocketAddr),
+}
+
+pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Result<()> {
     // not using crate CLIENT: don't want the retries etc
     let client = Client::builder()
         .user_agent(UA)
@@ -202,5 +213,36 @@ pub async fn serve(upstream: &Url, plc: Url, bind: SocketAddr) -> std::io::Resul
         .with(CatchPanic::new())
         .with(Tracing);
 
-    Server::new(TcpListener::bind(bind)).run(app).await
+    match listen {
+        ListenConf::Acme {
+            domains,
+            cache_path,
+            directory_url,
+        } => {
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .expect("crypto provider to be installable");
+
+            let mut auto_cert = AutoCert::builder()
+                .directory_url(directory_url)
+                .cache_path(cache_path);
+            for domain in domains {
+                auto_cert = auto_cert.domain(domain);
+            }
+            let auto_cert = auto_cert.build().expect("acme config to build");
+            run(app, TcpListener::bind("0.0.0.0:443").acme(auto_cert)).await
+        }
+        ListenConf::Bind(addr) => run(app, TcpListener::bind(addr)).await,
+    }
+}
+
+async fn run<A, L>(app: A, listener: L) -> std::io::Result<()>
+where
+    A: Endpoint + 'static,
+    L: Listener + 'static,
+{
+    Server::new(listener)
+        .name("allegedly (mirror)")
+        .run(app)
+        .await
 }

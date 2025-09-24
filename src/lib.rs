@@ -10,7 +10,7 @@ mod weekly;
 
 pub use backfill::backfill;
 pub use client::{CLIENT, UA};
-pub use mirror::serve;
+pub use mirror::{ListenConf, serve};
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
 pub use poll::{PageBoundaryState, get_page, poll_upstream};
 pub use ratelimit::GovernorMiddleware;
