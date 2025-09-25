@@ -46,9 +46,12 @@ Available APIs:
     tip: try `GET /{{did}}` to resolve an identity
 
 
-Allegedly is a suit of open-source CLI tools for working with PLC logs:
+Allegedly is a suite of open-source CLI tools from for working with PLC logs,
+from microcosm:
 
     https://tangled.org/@microcosm.blue/Allegedly
+
+    https://microcosm.blue
 
 
 [1] https://web.plc.directory
