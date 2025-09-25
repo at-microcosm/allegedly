@@ -183,6 +183,7 @@ async fn main() {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
                     backfill(FolderSource(dir), tx, source_workers.unwrap_or(1), until)
                         .await
+                        .inspect_err(|e| log::error!("backfill from folder problem: {e}"))
                         .expect("to source bundles from a folder");
                 } else {
                     log::info!("Fetching weekly bundles from from {http}");
