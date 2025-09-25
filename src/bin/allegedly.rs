@@ -1,6 +1,7 @@
 use allegedly::{Dt, bin::GlobalArgs, bin_init, pages_to_stdout, pages_to_weeks, poll_upstream};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::{path::PathBuf, time::Instant};
+use tokio::fs::create_dir_all;
 use tokio::sync::mpsc;
 
 mod backfill;
@@ -82,7 +83,9 @@ async fn main() -> anyhow::Result<()> {
                     .expect("to poll upstream")
             });
             log::trace!("ensuring output directory exists");
-            std::fs::create_dir_all(&dest).expect("to ensure output dir exists");
+            create_dir_all(&dest)
+                .await
+                .expect("to ensure output dir exists");
             pages_to_weeks(rx, dest, clobber)
                 .await
                 .expect("to write bundles to output files");

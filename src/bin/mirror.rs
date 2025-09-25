@@ -2,8 +2,7 @@ use allegedly::{Db, ListenConf, bin::GlobalArgs, bin_init, pages_to_pg, poll_ups
 use clap::Parser;
 use reqwest::Url;
 use std::{net::SocketAddr, path::PathBuf};
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::{fs::create_dir_all, sync::mpsc, task::JoinSet};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -64,11 +63,15 @@ pub async fn run(
         .expect("there to be at least one op in the db. did you backfill?");
 
     let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
-        (_, false, Some(cache_path)) => ListenConf::Acme {
-            domains: acme_domain,
-            cache_path,
-            directory_url: acme_directory_url.to_string(),
-        },
+        (_, false, Some(cache_path)) => {
+            log::info!("configuring acme for https at {acme_domain:?}...");
+            create_dir_all(&cache_path).await?;
+            ListenConf::Acme {
+                domains: acme_domain,
+                cache_path,
+                directory_url: acme_directory_url.to_string(),
+            }
+        }
         (bind, true, None) => ListenConf::Bind(bind),
         (_, _, _) => unreachable!(),
     };
