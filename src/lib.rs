@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 
 mod backfill;
 mod client;
@@ -7,6 +8,8 @@ mod plc_pg;
 mod poll;
 mod ratelimit;
 mod weekly;
+
+pub mod bin;
 
 pub use backfill::backfill;
 pub use client::{CLIENT, UA};
@@ -71,6 +74,46 @@ impl From<&Op> for OpKey {
             cid: cid.to_string(),
         }
     }
+}
+
+/// page forwarder who drops its channels on receipt of a small page
+///
+/// PLC will return up to 1000 ops on a page, and returns full pages until it
+/// has caught up, so this is a (hacky?) way to stop polling once we're up.
+pub fn full_pages(mut rx: mpsc::Receiver<ExportPage>) -> mpsc::Receiver<ExportPage> {
+    let (tx, fwd) = mpsc::channel(1);
+    tokio::task::spawn(async move {
+        while let Some(page) = rx.recv().await
+            && page.ops.len() > 900
+        {
+            tx.send(page).await.expect("to be able to forward a page");
+        }
+    });
+    fwd
+}
+
+pub async fn pages_to_stdout(
+    mut rx: mpsc::Receiver<ExportPage>,
+    notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
+) -> anyhow::Result<()> {
+    let mut last_at = None;
+    while let Some(page) = rx.recv().await {
+        for op in &page.ops {
+            println!("{}", serde_json::to_string(op)?);
+        }
+        if notify_last_at.is_some()
+            && let Some(s) = PageBoundaryState::new(&page)
+        {
+            last_at = last_at.filter(|&l| l >= s.last_at).or(Some(s.last_at));
+        }
+    }
+    if let Some(notify) = notify_last_at {
+        log::trace!("notifying last_at: {last_at:?}");
+        if notify.send(last_at).is_err() {
+            log::error!("receiver for last_at dropped, can't notify");
+        };
+    }
+    Ok(())
 }
 
 pub fn logo(name: &str) -> String {
