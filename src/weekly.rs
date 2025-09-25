@@ -198,13 +198,23 @@ pub async fn week_to_pages(
     dest: mpsc::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
     use futures::TryStreamExt;
-    let decoder = GzipDecoder::new(BufReader::new(source.reader_for(week).await?));
+    let reader = source.reader_for(week)
+        .await
+        .inspect_err(|e| log::error!("week_to_pages reader failed: {e}"))?;
+    let decoder = GzipDecoder::new(BufReader::new(reader));
     let mut chunks = pin!(LinesStream::new(BufReader::new(decoder).lines()).try_chunks(10000));
 
-    while let Some(chunk) = chunks.try_next().await? {
+    while let Some(chunk) = chunks
+        .try_next()
+        .await
+        .inspect_err(|e| log::error!("failed to get next chunk: {e}"))?
+    {
         let ops: Vec<String> = chunk.into_iter().collect();
         let page = ExportPage { ops };
-        dest.send(page).await?;
+        dest
+            .send(page)
+            .await
+            .inspect_err(|e| log::error!("failed to send page: {e}"))?;
     }
     Ok(())
 }
