@@ -4,28 +4,42 @@ use postgres_native_tls::MakeTlsConnector;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    task::{spawn, JoinHandle},
+    sync::{mpsc, oneshot},
+};
 use tokio_postgres::{
     Client, Error as PgError, NoTls,
     binary_copy::BinaryCopyInWriter,
     connect,
+    Socket,
     types::{Json, Type},
+    tls::MakeTlsConnect
 };
 
-fn get_tls(cert: PathBuf) -> MakeTlsConnector {
-    let cert = std::fs::read(cert).expect("to read cert file");
-    let cert = Certificate::from_pem(&cert).expect("to build cert");
-    let connector = TlsConnector::builder()
-        .add_root_certificate(cert)
-        .build()
-        .expect("to build tls connector");
-    MakeTlsConnector::new(connector)
+fn get_tls(cert: PathBuf) -> anyhow::Result<MakeTlsConnector> {
+    let cert = std::fs::read(cert)?;
+    let cert = Certificate::from_pem(&cert)?;
+    let connector = TlsConnector::builder().add_root_certificate(cert).build()?;
+    Ok(MakeTlsConnector::new(connector))
+}
+
+async fn get_client_and_task<T>(
+    uri: &str,
+    connector: T,
+) -> Result<(Client, JoinHandle<Result<(), PgError>>), PgError>
+where
+    T: MakeTlsConnect<Socket>,
+    <T as MakeTlsConnect<Socket>>::Stream: Send + 'static,
+{
+    let (client, connection) = connect(uri, connector).await?;
+    Ok((client, spawn(connection)))
 }
 
 /// a little tokio-postgres helper
 ///
 /// it's clone for easiness. it doesn't share any resources underneath after
-/// cloning at all so it's not meant for
+/// cloning *at all* so it's not meant for eg. handling public web requests
 #[derive(Clone)]
 pub struct Db {
     pg_uri: String,
@@ -38,26 +52,12 @@ impl Db {
         // it's what we expect: check for db migrations.
         log::trace!("checking migrations...");
 
-        let connector = cert.map(get_tls);
+        let connector = cert.map(get_tls).transpose()?;
 
-        let (client, connection_task) = if let Some(ref connector) = connector {
-            let (client, connection) = connect(pg_uri, connector.clone()).await?;
-            let task = tokio::task::spawn(async move {
-                connection
-                    .await
-                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .expect("pg validation connection not to blow up");
-            });
-            (client, task)
+        let (client, conn_task) = if let Some(ref connector) = connector {
+            get_client_and_task(pg_uri, connector.clone()).await?
         } else {
-            let (client, connection) = connect(pg_uri, NoTls).await?;
-            let task = tokio::task::spawn(async move {
-                connection
-                    .await
-                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .expect("pg validation connection not to blow up");
-            });
-            (client, task)
+            get_client_and_task(pg_uri, NoTls).await?
         };
 
         let migrations: Vec<String> = client
@@ -77,7 +77,7 @@ impl Db {
         );
         drop(client);
         // make sure the connection worker thing doesn't linger
-        connection_task.await?;
+        conn_task.await??;
         log::info!("db connection succeeded and plc migrations appear as expected");
 
         Ok(Self {
@@ -86,39 +86,18 @@ impl Db {
         })
     }
 
-    pub async fn connect(&self) -> Result<Client, PgError> {
+    #[must_use]
+    pub async fn connect(&self) -> Result<(Client, JoinHandle<Result<(), PgError>>), PgError> {
         log::trace!("connecting postgres...");
-        let client = if let Some(ref connector) = self.cert {
-            let (client, connection) = connect(&self.pg_uri, connector.clone()).await?;
-
-            // send the connection away to do the actual communication work
-            // apparently the connection will complete when the client drops
-            tokio::task::spawn(async move {
-                connection
-                    .await
-                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .expect("pg connection not to blow up");
-            });
-            client
+        if let Some(ref connector) = self.cert {
+            get_client_and_task(&self.pg_uri, connector.clone()).await
         } else {
-            let (client, connection) = connect(&self.pg_uri, NoTls).await?;
-
-            // send the connection away to do the actual communication work
-            // apparently the connection will complete when the client drops
-            tokio::task::spawn(async move {
-                connection
-                    .await
-                    .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .expect("pg connection not to blow up");
-            });
-            client
-        };
-
-        Ok(client)
+            get_client_and_task(&self.pg_uri, NoTls).await
+        }
     }
 
     pub async fn get_latest(&self) -> Result<Option<Dt>, PgError> {
-        let client = self.connect().await?;
+        let (client, task) = self.connect().await?;
         let dt: Option<Dt> = client
             .query_opt(
                 r#"SELECT "createdAt"
@@ -129,6 +108,7 @@ impl Db {
             )
             .await?
             .map(|row| row.get(0));
+        drop(task);
         Ok(dt)
     }
 }
@@ -137,7 +117,7 @@ pub async fn pages_to_pg(
     db: Db,
     mut pages: mpsc::Receiver<ExportPage>,
 ) -> anyhow::Result<&'static str> {
-    let mut client = db.connect().await?;
+    let (mut client, task) = db.connect().await?;
 
     let ops_stmt = client
         .prepare(
@@ -174,6 +154,7 @@ pub async fn pages_to_pg(
         }
         tx.commit().await?;
     }
+    drop(task);
 
     log::info!(
         "no more pages. inserted {ops_inserted} ops and {dids_inserted} dids in {:?}",
@@ -201,7 +182,7 @@ pub async fn backfill_to_pg(
     mut pages: mpsc::Receiver<ExportPage>,
     notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
 ) -> anyhow::Result<&'static str> {
-    let mut client = db.connect().await?;
+    let (mut client, task) = db.connect().await?;
 
     let t0 = Instant::now();
     let tx = client.transaction().await?;
@@ -316,6 +297,7 @@ pub async fn backfill_to_pg(
     log::trace!("set tables LOGGED: {:?}", t_step.elapsed());
 
     tx.commit().await?;
+    drop(task);
     log::info!("total backfill time: {:?}", t0.elapsed());
 
     Ok("backfill_to_pg")
