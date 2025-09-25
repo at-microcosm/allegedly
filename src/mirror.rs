@@ -198,6 +198,7 @@ pub enum ListenConf {
         domains: Vec<String>,
         cache_path: PathBuf,
         directory_url: String,
+        ipv6: bool,
     },
     Bind(SocketAddr),
 }
@@ -237,6 +238,7 @@ pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Resul
             domains,
             cache_path,
             directory_url,
+            ipv6,
         } => {
             rustls::crypto::aws_lc_rs::default_provider()
                 .install_default()
@@ -251,7 +253,13 @@ pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Resul
             let auto_cert = auto_cert.build().expect("acme config to build");
 
             let notice_task = tokio::task::spawn(run_insecure_notice());
-            let app_res = run(app, TcpListener::bind("0.0.0.0:443").acme(auto_cert)).await;
+            let listener = TcpListener::bind("0.0.0.0:443");
+            let app_res = if ipv6 {
+                let listener = listener.combine(TcpListener::bind("[::]:443"));
+                run(app, listener.acme(auto_cert)).await
+            } else {
+                run(app, listener.acme(auto_cert)).await
+            };
             log::warn!("server task ended, aborting insecure server task...");
             notice_task.abort();
             app_res?;

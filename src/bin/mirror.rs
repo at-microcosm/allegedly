@@ -39,6 +39,9 @@ pub struct Args {
     #[arg(long, requires("acme_domain"), env = "ALLEGEDLY_ACME_DIRECTORY_URL")]
     #[clap(default_value = "https://acme-v02.api.letsencrypt.org/directory")]
     acme_directory_url: Url,
+    /// listen for ipv6
+    #[arg(long, action, requires("acme_domain"), env = "ALLEGEDLY_ACME_IPV6")]
+    acme_ipv6: bool,
 }
 
 pub async fn run(
@@ -51,6 +54,7 @@ pub async fn run(
         acme_domain,
         acme_cache_path,
         acme_directory_url,
+        acme_ipv6,
     }: Args,
 ) -> anyhow::Result<()> {
     let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await?;
@@ -70,6 +74,7 @@ pub async fn run(
                 domains: acme_domain,
                 cache_path,
                 directory_url: acme_directory_url.to_string(),
+                ipv6: acme_ipv6,
             }
         }
         (bind, true, None) => ListenConf::Bind(bind),
