@@ -1,21 +1,31 @@
 use allegedly::{
-    Db, Dt, FolderSource, HttpSource, backfill, backfill_to_pg, bin::GlobalArgs, bin_init,
-    full_pages, pages_to_pg, pages_to_stdout, poll_upstream,
+    Db, Dt, ExportPage, FolderSource, HttpSource, backfill, backfill_to_pg, bin::GlobalArgs,
+    bin_init, full_pages, pages_to_pg, pages_to_stdout, poll_upstream,
 };
 use clap::Parser;
 use reqwest::Url;
 use std::path::PathBuf;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
+
+pub const DEFAULT_HTTP: &str = "https://plc.t3.storage.dev/plc.directory/";
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Remote URL prefix to fetch bundles from
     #[arg(long)]
-    #[clap(default_value = "https://plc.t3.storage.dev/plc.directory/")]
+    #[clap(default_value = DEFAULT_HTTP)]
     http: Url,
     /// Local folder to fetch bundles from (overrides `http`)
     #[arg(long)]
     dir: Option<PathBuf>,
+    /// Don't do weekly bulk-loading at all.
+    ///
+    /// overrides `http` and `dir`, makes catch_up redundant
+    #[arg(long, action)]
+    no_bulk: bool,
     /// Parallel bundle fetchers
     ///
     /// Default: 4 for http fetches, 1 for local folder
@@ -47,6 +57,7 @@ pub async fn run(
     Args {
         http,
         dir,
+        no_bulk,
         source_workers,
         to_postgres,
         postgres_cert,
@@ -55,76 +66,112 @@ pub async fn run(
         catch_up,
     }: Args,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = mpsc::channel(32); // these are big pages
-    tokio::task::spawn(async move {
-        if let Some(dir) = dir {
-            log::info!("Reading weekly bundles from local folder {dir:?}");
-            backfill(FolderSource(dir), tx, source_workers.unwrap_or(1), until)
-                .await
-                .inspect_err(|e| log::error!("backfill from folder problem: {e}"))
-                .expect("to source bundles from a folder");
-        } else {
-            log::info!("Fetching weekly bundles from from {http}");
-            backfill(HttpSource(http), tx, source_workers.unwrap_or(4), until)
-                .await
-                .expect("to source bundles from http");
-        }
-    });
+    let mut tasks = JoinSet::new();
 
-    // postgres writer will notify us as soon as the very last op's time is known
-    // so we can start catching up while pg is restoring indexes and stuff
-    let (notify_last_at, rx_last) = if catch_up {
+    let (bulk_tx, bulk_out) = mpsc::channel(32); // bulk uses big pages
+
+    // a bulk sink can notify us as soon as the very last op's time is known
+    // so we can start catching up while the sink might restore indexes and such
+    let (found_last_tx, found_last_out) = if catch_up {
         let (tx, rx) = oneshot::channel();
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
 
-    let to_postgres_url_bulk = to_postgres.clone();
-    let pg_cert = postgres_cert.clone();
-    let bulk_out_write = tokio::task::spawn(async move {
-        if let Some(ref url) = to_postgres_url_bulk {
-            let db = Db::new(url.as_str(), pg_cert)
-                .await
-                .expect("to get db for bulk out write");
-            backfill_to_pg(db, postgres_reset, rx, notify_last_at)
-                .await
-                .expect("to backfill to pg");
-        } else {
-            pages_to_stdout(rx, notify_last_at)
-                .await
-                .expect("to backfill to stdout");
-        }
-    });
+    let (poll_tx, poll_out) = mpsc::channel::<ExportPage>(128); // normal/small pages
+    let (full_tx, full_out) = mpsc::channel(1); // don't need to buffer at this filter
 
-    if let Some(rx_last) = rx_last {
+    // set up sources
+    if no_bulk {
+        // simple mode, just poll upstream from teh beginning
+        if http != DEFAULT_HTTP.parse()? {
+            log::warn!("ignoring non-default bulk http setting since --no-bulk was set");
+        }
+        if let Some(d) = dir {
+            log::warn!("ignoring bulk dir setting ({d:?}) since --no-bulk was set.");
+        }
+        if let Some(u) = until {
+            log::warn!(
+                "ignoring `until` setting ({u:?}) since --no-bulk was set. (feature request?)"
+            );
+        }
         let mut upstream = upstream;
         upstream.set_path("/export");
-        // wait until the time for `after` is known
-        let last_at = rx_last.await.expect("to get the last log's createdAt");
-        log::info!("beginning catch-up from {last_at:?} while the writer finalizes stuff");
-        let (tx, rx) = mpsc::channel(256); // these are small pages
-        tokio::task::spawn(async move {
-            poll_upstream(last_at, upstream, tx)
-                .await
-                .expect("polling upstream to work")
-        });
-        bulk_out_write.await.expect("to wait for bulk_out_write");
-        log::info!("writing catch-up pages");
-        let full_pages = full_pages(rx);
-        if let Some(url) = to_postgres {
-            let db = Db::new(url.as_str(), postgres_cert)
-                .await
-                .expect("to connect pg for catchup");
-            pages_to_pg(db, full_pages)
-                .await
-                .expect("to write catch-up pages to pg");
+        tasks.spawn(poll_upstream(None, upstream, poll_tx));
+        tasks.spawn(full_pages(poll_out, full_tx));
+        tasks.spawn(pages_to_stdout(full_out, None));
+    } else {
+        // fun mode
+
+        // set up bulk sources
+        if let Some(dir) = dir {
+            if http != DEFAULT_HTTP.parse()? {
+                anyhow::bail!(
+                    "non-default bulk http setting can't be used with bulk dir setting ({dir:?})"
+                );
+            }
+            tasks.spawn(backfill(
+                FolderSource(dir),
+                bulk_tx,
+                source_workers.unwrap_or(1),
+                until,
+            ));
         } else {
-            pages_to_stdout(full_pages, None)
-                .await
-                .expect("to write catch-up pages to stdout");
+            tasks.spawn(backfill(
+                HttpSource(http),
+                bulk_tx,
+                source_workers.unwrap_or(4),
+                until,
+            ));
+        }
+
+        // and the catch-up source...
+        if let Some(last) = found_last_out {
+            tasks.spawn(async move {
+                let mut upstream = upstream;
+                upstream.set_path("/export");
+                poll_upstream(last.await?, upstream, poll_tx).await
+            });
+        }
+
+        // set up sinks
+        if let Some(pg_url) = to_postgres {
+            log::trace!("connecting to postgres...");
+            let db = Db::new(pg_url.as_str(), postgres_cert).await?;
+            log::trace!("connected to postgres");
+
+            tasks.spawn(backfill_to_pg(
+                db.clone(),
+                postgres_reset,
+                bulk_out,
+                found_last_tx,
+            ));
+            tasks.spawn(pages_to_pg(db, full_out));
+        } else {
+            tasks.spawn(pages_to_stdout(bulk_out, found_last_tx));
+            tasks.spawn(pages_to_stdout(full_out, None));
         }
     }
+
+    while let Some(next) = tasks.join_next().await {
+        match next {
+            Err(e) if e.is_panic() => {
+                log::error!("a joinset task panicked: {e}. bailing now. (should we panic?)");
+                return Err(e.into());
+            }
+            Err(e) => {
+                log::error!("a joinset task failed to join: {e}");
+                return Err(e.into());
+            }
+            Ok(Err(e)) => {
+                log::error!("a joinset task completed with error: {e}");
+                return Err(e);
+            }
+            _ => {}
+        }
+    }
+
     Ok(())
 }
 

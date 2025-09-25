@@ -133,7 +133,7 @@ impl Db {
     }
 }
 
-pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> Result<(), PgError> {
+pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> anyhow::Result<()> {
     let mut client = db.connect().await?;
 
     let ops_stmt = client
@@ -197,7 +197,7 @@ pub async fn backfill_to_pg(
     reset: bool,
     mut pages: mpsc::Receiver<ExportPage>,
     notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
-) -> Result<(), PgError> {
+) -> anyhow::Result<()> {
     let mut client = db.connect().await?;
 
     let t0 = Instant::now();

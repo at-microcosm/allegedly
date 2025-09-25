@@ -80,16 +80,31 @@ impl From<&Op> for OpKey {
 ///
 /// PLC will return up to 1000 ops on a page, and returns full pages until it
 /// has caught up, so this is a (hacky?) way to stop polling once we're up.
-pub fn full_pages(mut rx: mpsc::Receiver<ExportPage>) -> mpsc::Receiver<ExportPage> {
-    let (tx, fwd) = mpsc::channel(1);
-    tokio::task::spawn(async move {
-        while let Some(page) = rx.recv().await
-            && page.ops.len() > 900
-        {
-            tx.send(page).await.expect("to be able to forward a page");
+pub async fn full_pages(
+    mut rx: mpsc::Receiver<ExportPage>,
+    tx: mpsc::Sender<ExportPage>,
+) -> anyhow::Result<()> {
+    while let Some(page) = rx.recv().await {
+        let n = page.ops.len();
+        if n < 900 {
+            let last_age = page.ops.last().map(|op| chrono::Utc::now() - op.created_at);
+            let Some(age) = last_age else {
+                log::info!("full_pages done, empty final page");
+                return Ok(());
+            };
+            if age <= chrono::TimeDelta::hours(6) {
+                log::info!("full_pages done, final page of {n} ops");
+            } else {
+                log::warn!("full_pages finished with small page of {n} ops, but it's {age} old");
+            }
+            return Ok(());
         }
-    });
-    fwd
+        log::trace!("full_pages: continuing with page of {n} ops");
+        tx.send(page).await?;
+    }
+    Err(anyhow::anyhow!(
+        "full_pages ran out of source material, sender closed"
+    ))
 }
 
 pub async fn pages_to_stdout(
