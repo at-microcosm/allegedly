@@ -98,7 +98,10 @@ impl BundleSource for FolderSource {
         let FolderSource(dir) = self;
         let path = dir.join(format!("{}.jsonl.gz", week.0));
         log::debug!("opening folder source: {path:?}");
-        Ok(File::open(path).await?)
+        let file = File::open(path)
+            .await
+            .inspect_err(|e| log::error!("failed to open file: {e}"))?;
+        Ok(file)
     }
 }
 
