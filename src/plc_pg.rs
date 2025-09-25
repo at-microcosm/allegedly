@@ -5,16 +5,15 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::time::Instant;
 use tokio::{
-    task::{spawn, JoinHandle},
     sync::{mpsc, oneshot},
+    task::{JoinHandle, spawn},
 };
 use tokio_postgres::{
-    Client, Error as PgError, NoTls,
+    Client, Error as PgError, NoTls, Socket,
     binary_copy::BinaryCopyInWriter,
     connect,
-    Socket,
+    tls::MakeTlsConnect,
     types::{Json, Type},
-    tls::MakeTlsConnect
 };
 
 fn get_tls(cert: PathBuf) -> anyhow::Result<MakeTlsConnector> {
@@ -86,7 +85,6 @@ impl Db {
         })
     }
 
-    #[must_use]
     pub async fn connect(&self) -> Result<(Client, JoinHandle<Result<(), PgError>>), PgError> {
         log::trace!("connecting postgres...");
         if let Some(ref connector) = self.cert {
@@ -117,6 +115,8 @@ pub async fn pages_to_pg(
     db: Db,
     mut pages: mpsc::Receiver<ExportPage>,
 ) -> anyhow::Result<&'static str> {
+    log::info!("starting pages_to_pg writer...");
+
     let (mut client, task) = db.connect().await?;
 
     let ops_stmt = client

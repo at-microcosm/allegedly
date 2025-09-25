@@ -186,7 +186,9 @@ pub enum ListenConf {
     Bind(SocketAddr),
 }
 
-pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Result<()> {
+pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Result<&'static str> {
+    log::info!("starting server...");
+
     // not using crate CLIENT: don't want the retries etc
     let client = Client::builder()
         .user_agent(UA)
@@ -231,11 +233,17 @@ pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Res
             }
             let auto_cert = auto_cert.build().expect("acme config to build");
 
-            run_insecure_notice();
-            run(app, TcpListener::bind("0.0.0.0:443").acme(auto_cert)).await
+            let notice_task = tokio::task::spawn(run_insecure_notice());
+            let app_res = run(app, TcpListener::bind("0.0.0.0:443").acme(auto_cert)).await;
+            log::warn!("server task ended, aborting insecure server task...");
+            notice_task.abort();
+            app_res?;
+            notice_task.await??;
         }
-        ListenConf::Bind(addr) => run(app, TcpListener::bind(addr)).await,
+        ListenConf::Bind(addr) => run(app, TcpListener::bind(addr)).await?,
     }
+
+    Ok("server (uh oh?)")
 }
 
 async fn run<A, L>(app: A, listener: L) -> std::io::Result<()>
@@ -250,7 +258,7 @@ where
 }
 
 /// kick off a tiny little server on a tokio task to tell people to use 443
-fn run_insecure_notice() {
+async fn run_insecure_notice() -> Result<(), std::io::Error> {
     #[handler]
     fn oop_plz_be_secure() -> (StatusCode, String) {
         (
@@ -266,11 +274,8 @@ You probably want to change your request to use HTTPS instead of HTTP.
     }
 
     let app = Route::new().at("/", get(oop_plz_be_secure)).with(Tracing);
-    let listener = TcpListener::bind("0.0.0.0:80");
-    tokio::task::spawn(async move {
-        Server::new(listener)
-            .name("allegedly (mirror:80 helper)")
-            .run(app)
-            .await
-    });
+    Server::new(TcpListener::bind("0.0.0.0:80"))
+        .name("allegedly (mirror:80 helper)")
+        .run(app)
+        .await
 }

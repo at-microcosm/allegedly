@@ -3,6 +3,7 @@ use clap::Parser;
 use reqwest::Url;
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -53,35 +54,14 @@ pub async fn run(
         acme_directory_url,
     }: Args,
 ) -> anyhow::Result<()> {
-    let db = Db::new(wrap_pg.as_str(), wrap_pg_cert)
-        .await
-        .expect("to connect to pg for mirroring");
+    let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await?;
+
+    // TODO: allow starting up with polling backfill from beginning?
+    log::debug!("getting the latest op from the db...");
     let latest = db
         .get_latest()
-        .await
-        .expect("to query for last createdAt")
+        .await?
         .expect("there to be at least one op in the db. did you backfill?");
-
-    let (tx, rx) = mpsc::channel(2);
-    // upstream poller
-    let mut url = upstream.clone();
-    tokio::task::spawn(async move {
-        log::info!("starting poll reader...");
-        url.set_path("/export");
-        tokio::task::spawn(async move {
-            poll_upstream(Some(latest), url, tx)
-                .await
-                .expect("to poll upstream for mirror sync")
-        });
-    });
-    // db writer
-    let poll_db = db.clone();
-    tokio::task::spawn(async move {
-        log::info!("starting db writer...");
-        pages_to_pg(poll_db, rx)
-            .await
-            .expect("to write to pg for mirror");
-    });
 
     let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
         (_, false, Some(cache_path)) => ListenConf::Acme {
@@ -93,9 +73,37 @@ pub async fn run(
         (_, _, _) => unreachable!(),
     };
 
-    serve(&upstream, wrap, listen_conf)
-        .await
-        .expect("to be able to serve the mirror proxy app");
+    let mut tasks = JoinSet::new();
+
+    let (send_page, recv_page) = mpsc::channel(8);
+
+    let mut poll_url = upstream.clone();
+    poll_url.set_path("/export");
+
+    tasks.spawn(poll_upstream(Some(latest), poll_url, send_page));
+    tasks.spawn(pages_to_pg(db.clone(), recv_page));
+    tasks.spawn(serve(upstream, wrap, listen_conf));
+
+    while let Some(next) = tasks.join_next().await {
+        match next {
+            Err(e) if e.is_panic() => {
+                log::error!("a joinset task panicked: {e}. bailing now. (should we panic?)");
+                return Err(e.into());
+            }
+            Err(e) => {
+                log::error!("a joinset task failed to join: {e}");
+                return Err(e.into());
+            }
+            Ok(Err(e)) => {
+                log::error!("a joinset task completed with error: {e}");
+                return Err(e);
+            }
+            Ok(Ok(name)) => {
+                log::trace!("a task completed: {name:?}. {} left", tasks.len());
+            }
+        }
+    }
+
     Ok(())
 }
 
