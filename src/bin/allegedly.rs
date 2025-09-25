@@ -125,7 +125,7 @@ async fn pages_to_stdout(
     let mut last_at = None;
     while let Some(page) = rx.recv().await {
         for op in &page.ops {
-            println!("{op}");
+            println!("{}", serde_json::to_string(op)?);
         }
         if notify_last_at.is_some()
             && let Some(s) = PageBoundaryState::new(&page)

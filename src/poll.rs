@@ -26,15 +26,25 @@ pub struct LastOp {
     pk: (String, String), // did, cid
 }
 
-impl From<Op<'_>> for LastOp {
+impl From<Op> for LastOp {
     fn from(op: Op) -> Self {
         Self {
             created_at: op.created_at,
-            pk: (op.did.to_string(), op.cid.to_string()),
+            pk: (op.did, op.cid),
         }
     }
 }
 
+impl From<&Op> for LastOp {
+    fn from(op: &Op) -> Self {
+        Self {
+            created_at: op.created_at,
+            pk: (op.did.clone(), op.cid.clone()),
+        }
+    }
+}
+
+// bit of a hack
 impl From<Dt> for LastOp {
     fn from(dt: Dt) -> Self {
         Self {
@@ -51,46 +61,11 @@ pub struct PageBoundaryState {
     keys_at: Vec<OpKey>, // expected to ~always be length one
 }
 
-// ok so this is silly.
-//
-// i think i had some idea that deferring parsing to later steps would make it
-// easier to do things like sometimes not parsing at all (where the output is
-// also json lines), and maybe avoid some memory shuffling.
-// but since the input already has to be split into lines, keeping them as line
-// strings is probably the worst option: space-inefficient, allows garbage, and
-// leads to, well, this impl.
-//
-// it almost could have been slick if the *original* was just reused, and the
-// parsed ops were just kind of on the side referencing into it, but i'm lazy
-// and didn't get it there.
-//
-// should unrefactor to make Op own its data again, parse (and deal with errors)
-// upfront, and probably greatly simplify everything downstream. simple.
+/// track keys at final createdAt to deduplicate the start of the next page
 impl PageBoundaryState {
     pub fn new(page: &ExportPage) -> Option<Self> {
-        let mut skips = 0;
-
         // grab the very last op
-        let (last_at, last_key) = loop {
-            let Some(s) = page.ops.iter().rev().nth(skips).cloned() else {
-                // there are no ops left? oop. bail.
-                // last_at and existing keys remain in tact if there was no later op
-                return None;
-            };
-            if s.is_empty() {
-                // annoying: ignore any trailing blank lines
-                skips += 1;
-                continue;
-            }
-            let Ok(op) = serde_json::from_str::<Op>(&s)
-                .inspect_err(|e| log::warn!("deduplication failed last op parsing ({s:?}: {e}), ignoring for downstream to deal with."))
-            else {
-                // doubly annoying: skip over trailing garbage??
-                skips += 1;
-                continue;
-            };
-            break (op.created_at, Into::<OpKey>::into(&op));
-        };
+        let (last_at, last_key) = page.ops.last().map(|op| (op.created_at, op.into()))?;
 
         // set initial state
         let mut me = Self {
@@ -99,7 +74,7 @@ impl PageBoundaryState {
         };
 
         // and make sure all keys at this time are captured from the back
-        me.capture_nth_last_at(page, last_at, skips);
+        me.capture_nth_last_at(page, last_at, 1);
 
         Some(me)
     }
@@ -108,43 +83,22 @@ impl PageBoundaryState {
         let to_remove: Vec<usize> = page
             .ops
             .iter()
-            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
-                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
             .enumerate()
-            .take_while(|(_, opr)| opr.as_ref().map(|op| op.created_at == self.last_at).unwrap_or(false))
-            .filter_map(|(i, opr)| {
-                if self.keys_at.contains(&(&opr.expect("any Errs were filtered by take_while")).into()) {
-                    Some(i)
-                } else { None }
-            })
+            .take_while(|(_, op)| op.created_at == self.last_at)
+            .filter(|(_, op)| self.keys_at.contains(&(*op).into()))
+            .map(|(i, _)| i)
             .collect();
 
-        // actually remove them. last to first to indices don't shift
+        // actually remove them. last to first so indices don't shift
         for dup_idx in to_remove.into_iter().rev() {
             page.ops.remove(dup_idx);
         }
 
         // grab the very last op
-        let mut skips = 0;
-        let (last_at, last_key) = loop {
-            let Some(s) = page.ops.iter().rev().nth(skips).cloned() else {
-                // there are no ops left? oop. bail.
-                // last_at and existing keys remain in tact if there was no later op
-                return;
-            };
-            if s.is_empty() {
-                // annoying: trim off any trailing blank lines
-                skips += 1;
-                continue;
-            }
-            let Ok(op) = serde_json::from_str::<Op>(&s)
-                .inspect_err(|e| log::warn!("deduplication failed last op parsing ({s:?}: {e}), ignoring for downstream to deal with."))
-            else {
-                // doubly annoying: skip over trailing garbage??
-                skips += 1;
-                continue;
-            };
-            break (op.created_at, Into::<OpKey>::into(&op));
+        let Some((last_at, last_key)) = page.ops.last().map(|op| (op.created_at, op.into())) else {
+            // there are no ops left? oop. bail.
+            // last_at and existing keys remain in tact
+            return;
         };
 
         // reset state (as long as time actually moved forward on this page)
@@ -157,7 +111,7 @@ impl PageBoundaryState {
             self.keys_at.push(last_key);
         }
         // and make sure all keys at this time are captured from the back
-        self.capture_nth_last_at(page, last_at, skips);
+        self.capture_nth_last_at(page, last_at, 1);
     }
 
     /// walk backwards from 2nd last and collect keys until created_at changes
@@ -166,12 +120,8 @@ impl PageBoundaryState {
             .iter()
             .rev()
             .skip(skips)
-            .skip(1) // we alredy added the very last one
-            .map(|s| serde_json::from_str::<Op>(s).inspect_err(|e|
-                log::warn!("deduplication failed op parsing ({s:?}: {e}), bailing for downstream to deal with.")))
-            .take_while(|opr| opr.as_ref().map(|op| op.created_at == last_at).unwrap_or(false))
-            .for_each(|opr| {
-                let op = &opr.expect("any Errs were filtered by take_while");
+            .take_while(|op| op.created_at == last_at)
+            .for_each(|op| {
                 self.keys_at.push(op.into());
             });
     }
@@ -180,7 +130,7 @@ impl PageBoundaryState {
 pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageError> {
     log::trace!("Getting page: {url}");
 
-    let ops: Vec<String> = CLIENT
+    let ops: Vec<Op> = CLIENT
         .get(url)
         .send()
         .await?
@@ -190,19 +140,13 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageE
         .trim()
         .split('\n')
         .filter_map(|s| {
-            let s = s.trim();
-            if s.is_empty() { None } else { Some(s) }
+            serde_json::from_str::<Op>(s)
+                .inspect_err(|e| log::warn!("failed to parse op: {e} ({s})"))
+                .ok()
         })
-        .map(Into::into)
         .collect();
 
-    let last_op = ops
-        .last()
-        .filter(|s| !s.is_empty())
-        .map(|s| serde_json::from_str::<Op>(s))
-        .transpose()?
-        .map(Into::into)
-        .inspect(|at| log::trace!("new last op: {at:?}"));
+    let last_op = ops.last().map(Into::into);
 
     Ok((ExportPage { ops }, last_op))
 }
@@ -252,29 +196,31 @@ mod test {
     const FIVES_TS: i64 = 1431648000;
     const NEXT_TS: i64 = 1431648001;
 
-    fn valid_op() -> serde_json::Value {
-        serde_json::json!({
+    fn valid_op() -> Op {
+        serde_json::from_value(serde_json::json!({
             "did": "did",
             "cid": "cid",
             "createdAt": "2015-05-15T00:00:00Z",
             "nullified": false,
             "operation": {},
-        })
+        }))
+        .unwrap()
     }
 
-    fn next_op() -> serde_json::Value {
-        serde_json::json!({
+    fn next_op() -> Op {
+        serde_json::from_value(serde_json::json!({
             "did": "didnext",
             "cid": "cidnext",
             "createdAt": "2015-05-15T00:00:01Z",
             "nullified": false,
             "operation": {},
-        })
+        }))
+        .unwrap()
     }
 
     fn base_state() -> PageBoundaryState {
         let page = ExportPage {
-            ops: vec![valid_op().to_string()],
+            ops: vec![valid_op()],
         };
         PageBoundaryState::new(&page).expect("to have a base page boundary state")
     }
@@ -287,41 +233,9 @@ mod test {
     }
 
     #[test]
-    fn test_boundary_new_empty_op() {
-        let page = ExportPage {
-            ops: vec!["".to_string()],
-        };
-        let state = PageBoundaryState::new(&page);
-        assert!(state.is_none());
-    }
-
-    #[test]
-    fn test_boundary_new_ignores_bad_op() {
-        let page = ExportPage {
-            ops: vec!["bad".to_string()],
-        };
-        let state = PageBoundaryState::new(&page);
-        assert!(state.is_none());
-    }
-
-    #[test]
-    fn test_boundary_new_multiple_bad_end() {
-        let page = ExportPage {
-            ops: vec![
-                "bad".to_string(),
-                "".to_string(),
-                "foo".to_string(),
-                "".to_string(),
-            ],
-        };
-        let state = PageBoundaryState::new(&page);
-        assert!(state.is_none());
-    }
-
-    #[test]
     fn test_boundary_new_one_op() {
         let page = ExportPage {
-            ops: vec![valid_op().to_string()],
+            ops: vec![valid_op()],
         };
         let state = PageBoundaryState::new(&page).unwrap();
         assert_eq!(state.last_at, Dt::from_timestamp(FIVES_TS, 0).unwrap());
@@ -335,34 +249,6 @@ mod test {
     }
 
     #[test]
-    fn test_boundary_new_one_op_with_stuff() {
-        let expect_same_state = |m, ops| {
-            let this_state = PageBoundaryState::new(&ExportPage { ops }).unwrap();
-            assert_eq!(this_state, base_state(), "{}", m);
-        };
-
-        expect_same_state("empty before", vec!["".to_string(), valid_op().to_string()]);
-
-        expect_same_state("empty after", vec![valid_op().to_string(), "".to_string()]);
-
-        expect_same_state(
-            "bad before, empty after",
-            vec!["bad".to_string(), valid_op().to_string(), "".to_string()],
-        );
-
-        expect_same_state(
-            "bad and empty before and after",
-            vec![
-                "".to_string(),
-                "bad".to_string(),
-                valid_op().to_string(),
-                "".to_string(),
-                "bad".to_string(),
-            ],
-        );
-    }
-
-    #[test]
     fn test_add_new_empty() {
         let mut state = base_state();
         state.apply_to_next(&mut ExportPage { ops: vec![] });
@@ -370,43 +256,9 @@ mod test {
     }
 
     #[test]
-    fn test_add_new_empty_op() {
-        let mut state = base_state();
-        state.apply_to_next(&mut ExportPage {
-            ops: vec!["".to_string()],
-        });
-        assert_eq!(state, base_state());
-    }
-
-    #[test]
-    fn test_add_new_ignores_bad_op() {
-        let mut state = base_state();
-        state.apply_to_next(&mut ExportPage {
-            ops: vec!["bad".to_string()],
-        });
-        assert_eq!(state, base_state());
-    }
-
-    #[test]
-    fn test_add_new_multiple_bad() {
-        let mut page = ExportPage {
-            ops: vec![
-                "bad".to_string(),
-                "".to_string(),
-                "foo".to_string(),
-                "".to_string(),
-            ],
-        };
-
-        let mut state = base_state();
-        state.apply_to_next(&mut page);
-        assert_eq!(state, base_state());
-    }
-
-    #[test]
     fn test_add_new_same_op() {
         let mut page = ExportPage {
-            ops: vec![valid_op().to_string()],
+            ops: vec![valid_op()],
         };
         let mut state = base_state();
         state.apply_to_next(&mut page);
@@ -417,12 +269,8 @@ mod test {
     fn test_add_new_same_time() {
         // make an op with a different OpKey
         let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
-        let mut page = ExportPage {
-            ops: vec![op.to_string()],
-        };
+        op.cid = "cid2".to_string();
+        let mut page = ExportPage { ops: vec![op] };
 
         let mut state = base_state();
         state.apply_to_next(&mut page);
@@ -446,11 +294,9 @@ mod test {
     fn test_add_new_same_time_dup_before() {
         // make an op with a different OpKey
         let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
+        op.cid = "cid2".to_string();
         let mut page = ExportPage {
-            ops: vec![valid_op().to_string(), op.to_string()],
+            ops: vec![valid_op(), op],
         };
 
         let mut state = base_state();
@@ -475,40 +321,9 @@ mod test {
     fn test_add_new_same_time_dup_after() {
         // make an op with a different OpKey
         let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
+        op.cid = "cid2".to_string();
         let mut page = ExportPage {
-            ops: vec![op.to_string(), valid_op().to_string()],
-        };
-
-        let mut state = base_state();
-        state.apply_to_next(&mut page);
-        assert_eq!(state.last_at, Dt::from_timestamp(FIVES_TS, 0).unwrap());
-        assert_eq!(
-            state.keys_at,
-            vec![
-                OpKey {
-                    cid: "cid".to_string(),
-                    did: "did".to_string(),
-                },
-                OpKey {
-                    cid: "cid2".to_string(),
-                    did: "did".to_string(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn test_add_new_same_time_blank_after() {
-        // make an op with a different OpKey
-        let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
-        let mut page = ExportPage {
-            ops: vec![op.to_string(), "".to_string()],
+            ops: vec![op, valid_op()],
         };
 
         let mut state = base_state();
@@ -532,7 +347,7 @@ mod test {
     #[test]
     fn test_add_new_next_time() {
         let mut page = ExportPage {
-            ops: vec![next_op().to_string()],
+            ops: vec![next_op()],
         };
         let mut state = base_state();
         state.apply_to_next(&mut page);
@@ -549,7 +364,7 @@ mod test {
     #[test]
     fn test_add_new_next_time_with_dup() {
         let mut page = ExportPage {
-            ops: vec![valid_op().to_string(), next_op().to_string()],
+            ops: vec![valid_op(), next_op()],
         };
         let mut state = base_state();
         state.apply_to_next(&mut page);
@@ -562,22 +377,20 @@ mod test {
             },]
         );
         assert_eq!(page.ops.len(), 1);
-        assert_eq!(page.ops[0], next_op().to_string());
+        assert_eq!(page.ops[0], next_op());
     }
 
     #[test]
     fn test_add_new_next_time_with_dup_and_new_prev_same_time() {
         // make an op with a different OpKey
         let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
+        op.cid = "cid2".to_string();
 
         let mut page = ExportPage {
             ops: vec![
-                valid_op().to_string(), // should get dropped
-                op.to_string(),         // should be kept
-                next_op().to_string(),
+                valid_op(), // should get dropped
+                op.clone(), // should be kept
+                next_op(),
             ],
         };
         let mut state = base_state();
@@ -591,23 +404,21 @@ mod test {
             },]
         );
         assert_eq!(page.ops.len(), 2);
-        assert_eq!(page.ops[0], op.to_string());
-        assert_eq!(page.ops[1], next_op().to_string());
+        assert_eq!(page.ops[0], op);
+        assert_eq!(page.ops[1], next_op());
     }
 
     #[test]
     fn test_add_new_next_time_with_dup_later_and_new_prev_same_time() {
         // make an op with a different OpKey
         let mut op = valid_op();
-        op.as_object_mut()
-            .unwrap()
-            .insert("cid".to_string(), "cid2".into());
+        op.cid = "cid2".to_string();
 
         let mut page = ExportPage {
             ops: vec![
-                op.to_string(),         // should be kept
-                valid_op().to_string(), // should get dropped
-                next_op().to_string(),
+                op.clone(), // should be kept
+                valid_op(), // should get dropped
+                next_op(),
             ],
         };
         let mut state = base_state();
@@ -621,7 +432,7 @@ mod test {
             },]
         );
         assert_eq!(page.ops.len(), 2);
-        assert_eq!(page.ops[0], op.to_string());
-        assert_eq!(page.ops[1], next_op().to_string());
+        assert_eq!(page.ops[0], op);
+        assert_eq!(page.ops[1], next_op());
     }
 }

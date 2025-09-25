@@ -142,12 +142,7 @@ pub async fn pages_to_weeks(
     let mut week_t0 = total_t0;
 
     while let Some(page) = rx.recv().await {
-        for mut s in page.ops {
-            let Ok(op) = serde_json::from_str::<Op>(&s)
-                .inspect_err(|e| log::error!("failed to parse plc op, ignoring: {e}"))
-            else {
-                continue;
-            };
+        for op in page.ops {
             let op_week = op.created_at.into();
             if current_week.map(|w| w != op_week).unwrap_or(true) {
                 encoder.shutdown().await?;
@@ -172,9 +167,10 @@ pub async fn pages_to_weeks(
                 week_ops = 0;
                 week_t0 = now;
             }
-            s.push('\n'); // hack
-            log::trace!("writing: {s}");
-            encoder.write_all(s.as_bytes()).await?;
+            log::trace!("writing: {op:?}");
+            encoder
+                .write_all(serde_json::to_string(&op)?.as_bytes())
+                .await?;
             total_ops += 1;
             week_ops += 1;
         }
@@ -201,7 +197,8 @@ pub async fn week_to_pages(
     dest: mpsc::Sender<ExportPage>,
 ) -> anyhow::Result<()> {
     use futures::TryStreamExt;
-    let reader = source.reader_for(week)
+    let reader = source
+        .reader_for(week)
         .await
         .inspect_err(|e| log::error!("week_to_pages reader failed: {e}"))?;
     let decoder = GzipDecoder::new(BufReader::new(reader));
@@ -212,10 +209,16 @@ pub async fn week_to_pages(
         .await
         .inspect_err(|e| log::error!("failed to get next chunk: {e}"))?
     {
-        let ops: Vec<String> = chunk.into_iter().collect();
+        let ops: Vec<Op> = chunk
+            .into_iter()
+            .filter_map(|s| {
+                serde_json::from_str::<Op>(&s)
+                    .inspect_err(|e| log::warn!("failed to parse op: {e} ({s})"))
+                    .ok()
+            })
+            .collect();
         let page = ExportPage { ops };
-        dest
-            .send(page)
+        dest.send(page)
             .await
             .inspect_err(|e| log::error!("failed to send page: {e}"))?;
     }

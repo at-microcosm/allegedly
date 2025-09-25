@@ -1,4 +1,4 @@
-use crate::{Dt, ExportPage, Op, PageBoundaryState};
+use crate::{Dt, ExportPage, PageBoundaryState};
 use native_tls::{Certificate, TlsConnector};
 use postgres_native_tls::MakeTlsConnector;
 use std::path::PathBuf;
@@ -154,11 +154,7 @@ pub async fn pages_to_pg(db: Db, mut pages: mpsc::Receiver<ExportPage>) -> Resul
     while let Some(page) = pages.recv().await {
         log::trace!("writing page with {} ops", page.ops.len());
         let tx = client.transaction().await?;
-        for s in page.ops {
-            let Ok(op) = serde_json::from_str::<Op>(&s) else {
-                log::warn!("ignoring unparseable op {s:?}");
-                continue;
-            };
+        for op in page.ops {
             ops_inserted += tx
                 .execute(
                     &ops_stmt,
@@ -258,16 +254,12 @@ pub async fn backfill_to_pg(
     let mut writer = pin!(BinaryCopyInWriter::new(sync, types));
     let mut last_at = None;
     while let Some(page) = pages.recv().await {
-        for s in &page.ops {
-            let Ok(op) = serde_json::from_str::<Op>(s) else {
-                log::warn!("ignoring unparseable op: {s:?}");
-                continue;
-            };
+        for op in &page.ops {
             writer
                 .as_mut()
                 .write(&[
                     &op.did,
-                    &Json(op.operation),
+                    &Json(op.operation.clone()),
                     &op.cid,
                     &op.nullified,
                     &op.created_at,

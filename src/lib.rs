@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod backfill;
 mod client;
@@ -23,7 +23,7 @@ pub type Dt = chrono::DateTime<chrono::Utc>;
 /// plc.directory caps /export at 1000 ops; backfill tasks may send more in a page.
 #[derive(Debug)]
 pub struct ExportPage {
-    pub ops: Vec<String>,
+    pub ops: Vec<Op>,
 }
 
 impl ExportPage {
@@ -35,15 +35,26 @@ impl ExportPage {
 /// A fully-deserialized plc operation
 ///
 /// including the plc's wrapping with timestmap and nullified state
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Op<'a> {
-    pub did: &'a str,
-    pub cid: &'a str,
+pub struct Op {
+    pub did: String,
+    pub cid: String,
     pub created_at: Dt,
     pub nullified: bool,
-    #[serde(borrow)]
-    pub operation: &'a serde_json::value::RawValue,
+    pub operation: Box<serde_json::value::RawValue>,
+}
+
+#[cfg(test)]
+impl PartialEq for Op {
+    fn eq(&self, other: &Self) -> bool {
+        self.did == other.did
+            && self.cid == other.cid
+            && self.created_at == other.created_at
+            && self.nullified == other.nullified
+            && serde_json::from_str::<serde_json::Value>(self.operation.get()).unwrap()
+                == serde_json::from_str::<serde_json::Value>(other.operation.get()).unwrap()
+    }
 }
 
 /// Database primary key for an op
@@ -53,8 +64,8 @@ pub struct OpKey {
     pub cid: String,
 }
 
-impl From<&Op<'_>> for OpKey {
-    fn from(Op { did, cid, .. }: &Op<'_>) -> Self {
+impl From<&Op> for OpKey {
+    fn from(Op { did, cid, .. }: &Op) -> Self {
         Self {
             did: did.to_string(),
             cid: cid.to_string(),

@@ -52,8 +52,7 @@ pub async fn backfill(
 
     // wait for the big backfill to finish
     while let Some(res) = workers.join_next().await {
-        res
-            .inspect_err(|e| log::error!("problem joining source workers: {e}"))?
+        res.inspect_err(|e| log::error!("problem joining source workers: {e}"))?
             .inspect_err(|e| log::error!("problem *from* source worker: {e}"))?;
     }
     log::info!("finished fetching backfill in {:?}", t_step.elapsed());
