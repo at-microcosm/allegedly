@@ -39,7 +39,9 @@ pub async fn backfill(
             while let Some(week) = weeks.lock().await.pop() {
                 let when = Into::<Dt>::into(week).to_rfc3339();
                 log::trace!("worker {w}: fetching week {when} (-{})", week.n_ago());
-                week_to_pages(source.clone(), week, dest.clone()).await?;
+                week_to_pages(source.clone(), week, dest.clone())
+                    .await
+                    .inspect_err(|e| log::error!("failing week_to_pages: {e}"))?;
             }
             log::info!("done with the weeks ig");
             Ok(())
