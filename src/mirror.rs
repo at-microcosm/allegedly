@@ -24,7 +24,8 @@ fn hello(Data(State { upstream, .. }): Data<&State>) -> String {
     format!(
         r#"{}
 
-This is a PLC[1] mirror running Allegedly[2] in mirror mode. Allegedly synchronizes and proxies to a downstream PLC reference server instance[3] (why?[4]).
+This is a PLC[1] mirror running Allegedly in mirror mode. Mirror mode wraps and
+synchronizes a local PLC reference server instance[2] (why?[3]).
 
 
 Configured upstream:
@@ -34,21 +35,33 @@ Configured upstream:
 
 Available APIs:
 
-    - All PLC GET requests [5].
-    - Rejects POSTs. This is a mirror.
+    - GET  /_health  Health and version info
 
-    try `GET /{{did}}` to resolve an identity
+    - GET  /*        Proxies to wrapped server; see PLC API docs:
+                     https://web.plc.directory/api/redoc
+
+    - POST /*        Always rejected. This is a mirror.
+
+
+    tip: try `GET /{{did}}` to resolve an identity
+
+
+Allegedly is a suit of open-source CLI tools for working with PLC logs:
+
+    https://tangled.org/@microcosm.blue/Allegedly
 
 
 [1] https://web.plc.directory
-[2] https://tangled.org/@microcosm.blue/Allegedly
-[3] https://github.com/did-method-plc/did-method-plc
-[4] https://updates.microcosm.blue/3lz7nwvh4zc2u
-[5] https://web.plc.directory/api/redoc
-
+[2] https://github.com/did-method-plc/did-method-plc
+[3] https://updates.microcosm.blue/3lz7nwvh4zc2u
 "#,
         logo("mirror")
     )
+}
+
+#[handler]
+fn favicon() -> impl IntoResponse {
+    include_bytes!("../favicon.ico").with_content_type("image/x-icon")
 }
 
 fn failed_to_reach_wrapped() -> String {
@@ -204,6 +217,7 @@ pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Resul
 
     let app = Route::new()
         .at("/", get(hello))
+        .at("/favicon.ico", get(favicon))
         .at("/_health", get(health))
         .at("/:any", get(proxy).post(nope))
         .with(AddData::new(state))
@@ -273,7 +287,10 @@ You probably want to change your request to use HTTPS instead of HTTP.
         )
     }
 
-    let app = Route::new().at("/", get(oop_plz_be_secure)).with(Tracing);
+    let app = Route::new()
+        .at("/", get(oop_plz_be_secure))
+        .at("/favicon.ico", get(favicon))
+        .with(Tracing);
     Server::new(TcpListener::bind("0.0.0.0:80"))
         .name("allegedly (mirror:80 helper)")
         .run(app)
