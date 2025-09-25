@@ -276,7 +276,7 @@ mod test {
         let page = ExportPage {
             ops: vec![valid_op().to_string()],
         };
-        PageBoundaryState::new(&page).unwrap()
+        PageBoundaryState::new(&page).expect("to have a base page boundary state")
     }
 
     #[test]

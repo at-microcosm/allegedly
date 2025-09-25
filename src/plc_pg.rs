@@ -13,12 +13,12 @@ use tokio_postgres::{
 };
 
 fn get_tls(cert: PathBuf) -> MakeTlsConnector {
-    let cert = std::fs::read(cert).unwrap();
-    let cert = Certificate::from_pem(&cert).unwrap();
+    let cert = std::fs::read(cert).expect("to read cert file");
+    let cert = Certificate::from_pem(&cert).expect("to build cert");
     let connector = TlsConnector::builder()
         .add_root_certificate(cert)
         .build()
-        .unwrap();
+        .expect("to build tls connector");
     MakeTlsConnector::new(connector)
 }
 
@@ -46,7 +46,7 @@ impl Db {
                 connection
                     .await
                     .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .unwrap();
+                    .expect("pg validation connection not to blow up");
             });
             (client, task)
         } else {
@@ -55,7 +55,7 @@ impl Db {
                 connection
                     .await
                     .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .unwrap();
+                    .expect("pg validation connection not to blow up");
             });
             (client, task)
         };
@@ -97,7 +97,7 @@ impl Db {
                 connection
                     .await
                     .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .unwrap();
+                    .expect("pg connection not to blow up");
             });
             client
         } else {
@@ -109,7 +109,7 @@ impl Db {
                 connection
                     .await
                     .inspect_err(|e| log::error!("connection ended with error: {e}"))
-                    .unwrap();
+                    .expect("pg connection not to blow up");
             });
             client
         };

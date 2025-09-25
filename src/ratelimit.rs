@@ -24,8 +24,8 @@ fn scale_quota(quota: Quota, factor: u32) -> Option<Quota> {
     let period = quota.replenish_interval() / factor;
     let burst = quota
         .burst_size()
-        .checked_mul(factor.try_into().unwrap())
-        .unwrap();
+        .checked_mul(factor.try_into().expect("factor to be non-zero"))
+        .expect("burst to be able to multiply");
     Quota::with_period(period).map(|q| q.allow_burst(burst))
 }
 
@@ -40,8 +40,8 @@ impl IpLimiters {
     pub fn new(quota: Quota) -> Self {
         Self {
             per_ip: RateLimiter::keyed(quota),
-            ip6_56: RateLimiter::keyed(scale_quota(quota, 8).unwrap()),
-            ip6_48: RateLimiter::keyed(scale_quota(quota, 256).unwrap()),
+            ip6_56: RateLimiter::keyed(scale_quota(quota, 8).expect("to scale quota")),
+            ip6_48: RateLimiter::keyed(scale_quota(quota, 256).expect("to scale quota")),
         }
     }
     pub fn check_key(&self, ip: IpAddr) -> Result<(), Duration> {
@@ -56,11 +56,19 @@ impl IpLimiters {
                     .map_err(asdf);
                 let check_56 = self
                     .ip6_56
-                    .check_key(a.octets()[..7].try_into().unwrap())
+                    .check_key(
+                        a.octets()[..7]
+                            .try_into()
+                            .expect("to check ip6 /56 limiter"),
+                    )
                     .map_err(asdf);
                 let check_48 = self
                     .ip6_48
-                    .check_key(a.octets()[..6].try_into().unwrap())
+                    .check_key(
+                        a.octets()[..6]
+                            .try_into()
+                            .expect("to check ip6 /48 limiter"),
+                    )
                     .map_err(asdf);
                 check_ip.and(check_56).and(check_48)
             }
@@ -135,7 +143,7 @@ impl<E: Endpoint> Endpoint for GovernorMiddlewareImpl<E> {
         let remote = req
             .remote_addr()
             .as_socket_addr()
-            .unwrap_or_else(|| panic!("failed to get request's remote addr")) // TODO
+            .expect("failed to get request's remote addr") // TODO
             .ip();
 
         log::trace!("remote: {remote}");

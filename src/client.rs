@@ -10,7 +10,10 @@ pub const UA: &str = concat!(
 );
 
 pub static CLIENT: LazyLock<ClientWithMiddleware> = LazyLock::new(|| {
-    let inner = Client::builder().user_agent(UA).build().unwrap();
+    let inner = Client::builder()
+        .user_agent(UA)
+        .build()
+        .expect("reqwest client to build");
 
     let policy = ExponentialBackoff::builder().build_with_max_retries(12);
 

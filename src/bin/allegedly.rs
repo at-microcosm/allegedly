@@ -36,9 +36,10 @@ enum Commands {
         /// Bulk load into did-method-plc-compatible postgres instead of stdout
         ///
         /// Pass a postgres connection url like "postgresql://localhost:5432"
-        #[arg(long)]
+        #[arg(long, env = "ALLEGEDLY_TO_POSTGRES")]
         to_postgres: Option<Url>,
         /// Cert for postgres (if needed)
+        #[arg(long)]
         postgres_cert: Option<PathBuf>,
         /// Delete all operations from the postgres db before starting
         ///
@@ -82,6 +83,7 @@ enum Commands {
         #[arg(long, env = "ALLEGEDLY_WRAP_PG")]
         wrap_pg: Url,
         /// path to tls cert for the wrapped postgres db, if needed
+        #[arg(long, env = "ALLEGEDLY_WRAP_PG_CERT")]
         wrap_pg_cert: Option<PathBuf>,
         /// wrapping server listen address
         #[arg(short, long, env = "ALLEGEDLY_BIND")]
@@ -150,7 +152,7 @@ fn full_pages(mut rx: mpsc::Receiver<ExportPage>) -> mpsc::Receiver<ExportPage> 
         while let Some(page) = rx.recv().await
             && page.ops.len() > 900
         {
-            tx.send(page).await.unwrap();
+            tx.send(page).await.expect("to be able to forward a page");
         }
     });
     fwd
@@ -181,12 +183,12 @@ async fn main() {
                     log::info!("Reading weekly bundles from local folder {dir:?}");
                     backfill(FolderSource(dir), tx, source_workers.unwrap_or(1), until)
                         .await
-                        .unwrap();
+                        .expect("to source bundles from a folder");
                 } else {
                     log::info!("Fetching weekly bundles from from {http}");
                     backfill(HttpSource(http), tx, source_workers.unwrap_or(4), until)
                         .await
-                        .unwrap();
+                        .expect("to source bundles from http");
                 }
             });
 
@@ -203,12 +205,16 @@ async fn main() {
             let pg_cert = postgres_cert.clone();
             let bulk_out_write = tokio::task::spawn(async move {
                 if let Some(ref url) = to_postgres_url_bulk {
-                    let db = Db::new(url.as_str(), pg_cert).await.unwrap();
+                    let db = Db::new(url.as_str(), pg_cert)
+                        .await
+                        .expect("to get db for bulk out write");
                     backfill_to_pg(db, postgres_reset, rx, notify_last_at)
                         .await
-                        .unwrap();
+                        .expect("to backfill to pg");
                 } else {
-                    pages_to_stdout(rx, notify_last_at).await.unwrap();
+                    pages_to_stdout(rx, notify_last_at)
+                        .await
+                        .expect("to backfill to stdout");
                 }
             });
 
@@ -216,20 +222,28 @@ async fn main() {
                 let mut upstream = args.upstream;
                 upstream.set_path("/export");
                 // wait until the time for `after` is known
-                let last_at = rx_last.await.unwrap();
+                let last_at = rx_last.await.expect("to get the last log's createdAt");
                 log::info!("beginning catch-up from {last_at:?} while the writer finalizes stuff");
                 let (tx, rx) = mpsc::channel(256); // these are small pages
-                tokio::task::spawn(
-                    async move { poll_upstream(last_at, upstream, tx).await.unwrap() },
-                );
-                bulk_out_write.await.unwrap();
+                tokio::task::spawn(async move {
+                    poll_upstream(last_at, upstream, tx)
+                        .await
+                        .expect("polling upstream to work")
+                });
+                bulk_out_write.await.expect("to wait for bulk_out_write");
                 log::info!("writing catch-up pages");
                 let full_pages = full_pages(rx);
                 if let Some(url) = to_postgres {
-                    let db = Db::new(url.as_str(), postgres_cert).await.unwrap();
-                    pages_to_pg(db, full_pages).await.unwrap();
+                    let db = Db::new(url.as_str(), postgres_cert)
+                        .await
+                        .expect("to connect pg for catchup");
+                    pages_to_pg(db, full_pages)
+                        .await
+                        .expect("to write catch-up pages to pg");
                 } else {
-                    pages_to_stdout(full_pages, None).await.unwrap();
+                    pages_to_stdout(full_pages, None)
+                        .await
+                        .expect("to write catch-up pages to stdout");
                 }
             }
         }
@@ -241,10 +255,16 @@ async fn main() {
             let mut url = args.upstream;
             url.set_path("/export");
             let (tx, rx) = mpsc::channel(32); // read ahead if gzip stalls for some reason
-            tokio::task::spawn(async move { poll_upstream(Some(after), url, tx).await.unwrap() });
+            tokio::task::spawn(async move {
+                poll_upstream(Some(after), url, tx)
+                    .await
+                    .expect("to poll upstream")
+            });
             log::trace!("ensuring output directory exists");
-            std::fs::create_dir_all(&dest).unwrap();
-            pages_to_weeks(rx, dest, clobber).await.unwrap();
+            std::fs::create_dir_all(&dest).expect("to ensure output dir exists");
+            pages_to_weeks(rx, dest, clobber)
+                .await
+                .expect("to write bundles to output files");
         }
         Commands::Mirror {
             wrap,
@@ -255,11 +275,13 @@ async fn main() {
             acme_cache_path,
             acme_directory_url,
         } => {
-            let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await.unwrap();
+            let db = Db::new(wrap_pg.as_str(), wrap_pg_cert)
+                .await
+                .expect("to connect to pg for mirroring");
             let latest = db
                 .get_latest()
                 .await
-                .unwrap()
+                .expect("to query for last createdAt")
                 .expect("there to be at least one op in the db. did you backfill?");
 
             let (tx, rx) = mpsc::channel(2);
@@ -268,15 +290,19 @@ async fn main() {
             tokio::task::spawn(async move {
                 log::info!("starting poll reader...");
                 url.set_path("/export");
-                tokio::task::spawn(
-                    async move { poll_upstream(Some(latest), url, tx).await.unwrap() },
-                );
+                tokio::task::spawn(async move {
+                    poll_upstream(Some(latest), url, tx)
+                        .await
+                        .expect("to poll upstream for mirror sync")
+                });
             });
             // db writer
             let poll_db = db.clone();
             tokio::task::spawn(async move {
                 log::info!("starting db writer...");
-                pages_to_pg(poll_db, rx).await.unwrap();
+                pages_to_pg(poll_db, rx)
+                    .await
+                    .expect("to write to pg for mirror");
             });
 
             let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
@@ -289,15 +315,23 @@ async fn main() {
                 (_, _, _) => unreachable!(),
             };
 
-            serve(&args.upstream, wrap, listen_conf).await.unwrap();
+            serve(&args.upstream, wrap, listen_conf)
+                .await
+                .expect("to be able to serve the mirror proxy app");
         }
         Commands::Tail { after } => {
             let mut url = args.upstream;
             url.set_path("/export");
             let start_at = after.or_else(|| Some(chrono::Utc::now()));
             let (tx, rx) = mpsc::channel(1);
-            tokio::task::spawn(async move { poll_upstream(start_at, url, tx).await.unwrap() });
-            pages_to_stdout(rx, None).await.unwrap();
+            tokio::task::spawn(async move {
+                poll_upstream(start_at, url, tx)
+                    .await
+                    .expect("to poll upstream")
+            });
+            pages_to_stdout(rx, None)
+                .await
+                .expect("to write pages to stdout");
         }
     }
     log::info!("whew, {:?}. goodbye!", t0.elapsed());

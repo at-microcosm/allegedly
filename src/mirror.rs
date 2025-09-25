@@ -192,7 +192,7 @@ pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Res
         .user_agent(UA)
         .timeout(Duration::from_secs(10)) // fallback
         .build()
-        .unwrap();
+        .expect("reqwest client to build");
 
     let state = State {
         client,
@@ -208,7 +208,7 @@ pub async fn serve(upstream: &Url, plc: Url, listen: ListenConf) -> std::io::Res
         .with(Cors::new().allow_credentials(false))
         .with(Compression::new())
         .with(GovernorMiddleware::new(Quota::per_minute(
-            3000.try_into().unwrap(),
+            3000.try_into().expect("ratelimit middleware to build"),
         )))
         .with(CatchPanic::new())
         .with(Tracing);
