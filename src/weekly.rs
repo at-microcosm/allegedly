@@ -97,6 +97,7 @@ impl BundleSource for FolderSource {
     async fn reader_for(&self, week: Week) -> anyhow::Result<impl AsyncRead> {
         let FolderSource(dir) = self;
         let path = dir.join(format!("{}.jsonl.gz", week.0));
+        log::debug!("opening folder source: {path:?}");
         Ok(File::open(path).await?)
     }
 }
