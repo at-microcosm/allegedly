@@ -83,21 +83,21 @@ impl From<&Op> for OpKey {
 pub async fn full_pages(
     mut rx: mpsc::Receiver<ExportPage>,
     tx: mpsc::Sender<ExportPage>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<&'static str> {
     while let Some(page) = rx.recv().await {
         let n = page.ops.len();
         if n < 900 {
             let last_age = page.ops.last().map(|op| chrono::Utc::now() - op.created_at);
             let Some(age) = last_age else {
                 log::info!("full_pages done, empty final page");
-                return Ok(());
+                return Ok("full pages (hmm)");
             };
             if age <= chrono::TimeDelta::hours(6) {
                 log::info!("full_pages done, final page of {n} ops");
             } else {
                 log::warn!("full_pages finished with small page of {n} ops, but it's {age} old");
             }
-            return Ok(());
+            return Ok("full pages (cool)");
         }
         log::trace!("full_pages: continuing with page of {n} ops");
         tx.send(page).await?;
@@ -110,7 +110,7 @@ pub async fn full_pages(
 pub async fn pages_to_stdout(
     mut rx: mpsc::Receiver<ExportPage>,
     notify_last_at: Option<oneshot::Sender<Option<Dt>>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<&'static str> {
     let mut last_at = None;
     while let Some(page) = rx.recv().await {
         for op in &page.ops {
@@ -128,7 +128,7 @@ pub async fn pages_to_stdout(
             log::error!("receiver for last_at dropped, can't notify");
         };
     }
-    Ok(())
+    Ok("pages_to_stdout")
 }
 
 pub fn logo(name: &str) -> String {

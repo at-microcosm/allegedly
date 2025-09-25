@@ -13,7 +13,7 @@ pub async fn backfill(
     dest: mpsc::Sender<ExportPage>,
     source_workers: usize,
     until: Option<Dt>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<&'static str> {
     // queue up the week bundles that should be available
     let weeks = Arc::new(Mutex::new(
         until
@@ -55,6 +55,10 @@ pub async fn backfill(
         res.inspect_err(|e| log::error!("problem joining source workers: {e}"))?
             .inspect_err(|e| log::error!("problem *from* source worker: {e}"))?;
     }
-    log::info!("finished fetching backfill in {:?}", t_step.elapsed());
-    Ok(())
+    log::info!(
+        "finished fetching backfill in {:?}. senders remaining: {}",
+        t_step.elapsed(),
+        dest.strong_count()
+    );
+    Ok("backfill")
 }

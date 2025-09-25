@@ -155,7 +155,7 @@ pub async fn poll_upstream(
     after: Option<Dt>,
     base: Url,
     dest: mpsc::Sender<ExportPage>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<&'static str> {
     let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
     let mut prev_last: Option<LastOp> = after.map(Into::into);
     let mut boundary_state: Option<PageBoundaryState> = None;

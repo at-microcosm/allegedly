@@ -66,7 +66,7 @@ pub async fn run(
         catch_up,
     }: Args,
 ) -> anyhow::Result<()> {
-    let mut tasks = JoinSet::new();
+    let mut tasks = JoinSet::<anyhow::Result<&'static str>>::new();
 
     let (bulk_tx, bulk_out) = mpsc::channel(32); // bulk uses big pages
 
@@ -147,10 +147,14 @@ pub async fn run(
                 bulk_out,
                 found_last_tx,
             ));
-            tasks.spawn(pages_to_pg(db, full_out));
+            if catch_up {
+                tasks.spawn(pages_to_pg(db, full_out));
+            }
         } else {
             tasks.spawn(pages_to_stdout(bulk_out, found_last_tx));
-            tasks.spawn(pages_to_stdout(full_out, None));
+            if catch_up {
+                tasks.spawn(pages_to_stdout(full_out, None));
+            }
         }
     }
 
@@ -168,7 +172,9 @@ pub async fn run(
                 log::error!("a joinset task completed with error: {e}");
                 return Err(e);
             }
-            _ => {}
+            Ok(Ok(name)) => {
+                log::trace!("a task completed: {name:?}. {} left", tasks.len());
+            }
         }
     }
 
