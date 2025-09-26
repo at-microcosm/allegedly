@@ -90,7 +90,7 @@ pub async fn run(
 
     tasks.spawn(poll_upstream(Some(latest), poll_url, send_page));
     tasks.spawn(pages_to_pg(db.clone(), recv_page));
-    tasks.spawn(serve(upstream, wrap, listen_conf));
+    tasks.spawn(serve(upstream, wrap, listen_conf, db.clone()));
 
     while let Some(next) = tasks.join_next().await {
         match next {

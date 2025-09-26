@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 mod backfill;
+mod cached_value;
 mod client;
 mod mirror;
 mod plc_pg;
@@ -12,6 +13,7 @@ mod weekly;
 pub mod bin;
 
 pub use backfill::backfill;
+pub use cached_value::{CachedValue, Fetcher};
 pub use client::{CLIENT, UA};
 pub use mirror::{ListenConf, serve};
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};

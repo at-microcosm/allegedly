@@ -1,4 +1,4 @@
-use crate::{GovernorMiddleware, UA, logo};
+use crate::{CachedValue, Db, Dt, Fetcher, GovernorMiddleware, UA, logo};
 use futures::TryStreamExt;
 use governor::Quota;
 use poem::{
@@ -12,11 +12,23 @@ use poem::{
 use reqwest::{Client, Url};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct State {
     client: Client,
     plc: Url,
     upstream: Url,
+    latest_at: CachedValue<Dt, LatestAt>,
+}
+
+#[derive(Clone)]
+struct LatestAt(Db);
+impl Fetcher<Dt> for LatestAt {
+    async fn fetch(&self) -> Result<Dt, Box<dyn std::error::Error>> {
+        let now = self.0.get_latest().await?.ok_or(anyhow::anyhow!(
+            "expected to find at least one thing in the db"
+        ))?;
+        Ok(now)
+    }
 }
 
 #[handler]
@@ -119,6 +131,7 @@ async fn health(
         plc,
         client,
         upstream,
+        latest_at,
     }): Data<&State>,
 ) -> impl IntoResponse {
     let mut overall_status = StatusCode::OK;
@@ -130,6 +143,7 @@ async fn health(
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
+    let latest = latest_at.get().await.ok();
     (
         overall_status,
         Json(serde_json::json!({
@@ -137,6 +151,7 @@ async fn health(
             "version": env!("CARGO_PKG_VERSION"),
             "wrapped_plc": wrapped_status,
             "upstream_plc": upstream_status,
+            "latest_at": latest,
         })),
     )
 }
@@ -203,7 +218,12 @@ pub enum ListenConf {
     Bind(SocketAddr),
 }
 
-pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Result<&'static str> {
+pub async fn serve(
+    upstream: Url,
+    plc: Url,
+    listen: ListenConf,
+    db: Db,
+) -> anyhow::Result<&'static str> {
     log::info!("starting server...");
 
     // not using crate CLIENT: don't want the retries etc
@@ -213,10 +233,13 @@ pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Resul
         .build()
         .expect("reqwest client to build");
 
+    let latest_at = CachedValue::new(LatestAt(db), Duration::from_secs(1));
+
     let state = State {
         client,
         plc,
         upstream: upstream.clone(),
+        latest_at,
     };
 
     let app = Route::new()
@@ -252,14 +275,9 @@ pub async fn serve(upstream: Url, plc: Url, listen: ListenConf) -> anyhow::Resul
             }
             let auto_cert = auto_cert.build().expect("acme config to build");
 
-            let notice_task = tokio::task::spawn(run_insecure_notice());
-            let listener = TcpListener::bind("0.0.0.0:443");
-            let app_res = if ipv6 {
-                let listener = listener.combine(TcpListener::bind("[::]:443"));
-                run(app, listener.acme(auto_cert)).await
-            } else {
-                run(app, listener.acme(auto_cert)).await
-            };
+            let notice_task = tokio::task::spawn(run_insecure_notice(ipv6));
+            let listener = TcpListener::bind(if ipv6 { "[::]:443" } else { "0.0.0.0:443" });
+            let app_res = run(app, listener.acme(auto_cert)).await;
             log::warn!("server task ended, aborting insecure server task...");
             notice_task.abort();
             app_res?;
@@ -283,7 +301,7 @@ where
 }
 
 /// kick off a tiny little server on a tokio task to tell people to use 443
-async fn run_insecure_notice() -> Result<(), std::io::Error> {
+async fn run_insecure_notice(ipv6: bool) -> Result<(), std::io::Error> {
     #[handler]
     fn oop_plz_be_secure() -> (StatusCode, String) {
         (
@@ -302,8 +320,12 @@ You probably want to change your request to use HTTPS instead of HTTP.
         .at("/", get(oop_plz_be_secure))
         .at("/favicon.ico", get(favicon))
         .with(Tracing);
-    Server::new(TcpListener::bind("0.0.0.0:80"))
-        .name("allegedly (mirror:80 helper)")
-        .run(app)
-        .await
+    Server::new(TcpListener::bind(if ipv6 {
+        "[::]:80"
+    } else {
+        "0.0.0.0:80"
+    }))
+    .name("allegedly (mirror:80 helper)")
+    .run(app)
+    .await
 }
