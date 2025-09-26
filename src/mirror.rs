@@ -17,18 +17,8 @@ struct State {
     client: Client,
     plc: Url,
     upstream: Url,
-    latest_at: CachedValue<Dt, LatestAt>,
-}
-
-#[derive(Clone)]
-struct LatestAt(Db);
-impl Fetcher<Dt> for LatestAt {
-    async fn fetch(&self) -> Result<Dt, Box<dyn std::error::Error>> {
-        let now = self.0.get_latest().await?.ok_or(anyhow::anyhow!(
-            "expected to find at least one thing in the db"
-        ))?;
-        Ok(now)
-    }
+    latest_at: CachedValue<Dt, GetLatestAt>,
+    upstream_status: CachedValue<PlcStatus, CheckUpstream>,
 }
 
 #[handler]
@@ -89,7 +79,9 @@ Failed to reach the wrapped reference PLC server. Sorry.
     )
 }
 
-async fn plc_status(url: &Url, client: &Client) -> (bool, serde_json::Value) {
+type PlcStatus = (bool, serde_json::Value);
+
+async fn plc_status(url: &Url, client: &Client) -> PlcStatus {
     use serde_json::json;
 
     let mut url = url.clone();
@@ -125,13 +117,33 @@ async fn plc_status(url: &Url, client: &Client) -> (bool, serde_json::Value) {
     }
 }
 
+#[derive(Clone)]
+struct GetLatestAt(Db);
+impl Fetcher<Dt> for GetLatestAt {
+    async fn fetch(&self) -> Result<Dt, Box<dyn std::error::Error>> {
+        let now = self.0.get_latest().await?.ok_or(anyhow::anyhow!(
+            "expected to find at least one thing in the db"
+        ))?;
+        Ok(now)
+    }
+}
+
+#[derive(Clone)]
+struct CheckUpstream(Url, Client);
+impl Fetcher<PlcStatus> for CheckUpstream {
+    async fn fetch(&self) -> Result<PlcStatus, Box<dyn std::error::Error>> {
+        Ok(plc_status(&self.0, &self.1).await)
+    }
+}
+
 #[handler]
 async fn health(
     Data(State {
         plc,
         client,
-        upstream,
         latest_at,
+        upstream_status,
+        ..
     }): Data<&State>,
 ) -> impl IntoResponse {
     let mut overall_status = StatusCode::OK;
@@ -139,7 +151,7 @@ async fn health(
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
-    let (ok, upstream_status) = plc_status(upstream, client).await;
+    let (ok, upstream_status) = upstream_status.get().await.expect("plc_status infallible");
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
@@ -233,13 +245,18 @@ pub async fn serve(
         .build()
         .expect("reqwest client to build");
 
-    let latest_at = CachedValue::new(LatestAt(db), Duration::from_secs(1));
+    let latest_at = CachedValue::new(GetLatestAt(db), Duration::from_secs(2));
+    let upstream_status = CachedValue::new(
+        CheckUpstream(upstream.clone(), client.clone()),
+        Duration::from_secs(6),
+    );
 
     let state = State {
         client,
         plc,
         upstream: upstream.clone(),
         latest_at,
+        upstream_status,
     };
 
     let app = Route::new()

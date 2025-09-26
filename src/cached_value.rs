@@ -16,8 +16,10 @@ struct ExpiringValue<T: Clone> {
 impl<T: Clone> ExpiringValue<T> {
     fn get(&self, now: Instant) -> Option<T> {
         if now <= self.expires {
+            log::trace!("returning val (fresh for {:?})", self.expires - now);
             Some(self.value.clone())
         } else {
+            log::trace!("hiding expired val");
             None
         }
     }
@@ -48,7 +50,20 @@ impl<T: Clone, F: Fetcher<T>> CachedValue<T, F> {
         if let Some(v) = val.as_ref().and_then(|v| v.get(now)) {
             return Ok(v);
         }
-        let new = self.fetcher.fetch().await?;
+        log::debug!(
+            "value {}, fetching...",
+            if val.is_some() {
+                "expired"
+            } else {
+                "not present"
+            }
+        );
+        let new = self
+            .fetcher
+            .fetch()
+            .await
+            .inspect_err(|e| log::warn!("value fetch failed, next access will retry: {e}"))?;
+        log::debug!("fetched ok, saving a copy for cache.");
         *val = Some(ExpiringValue {
             value: new.clone(),
             expires: now + self.validitiy,
