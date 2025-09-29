@@ -1,4 +1,6 @@
-use allegedly::{Db, ListenConf, bin::GlobalArgs, bin_init, pages_to_pg, poll_upstream, serve};
+use allegedly::{
+    Db, ExperimentalConf, ListenConf, bin::GlobalArgs, bin_init, pages_to_pg, poll_upstream, serve,
+};
 use clap::Parser;
 use reqwest::Url;
 use std::{net::SocketAddr, path::PathBuf};
@@ -39,9 +41,22 @@ pub struct Args {
     #[arg(long, requires("acme_domain"), env = "ALLEGEDLY_ACME_DIRECTORY_URL")]
     #[clap(default_value = "https://acme-v02.api.letsencrypt.org/directory")]
     acme_directory_url: Url,
-    /// listen for ipv6
+    /// try to listen for ipv6
     #[arg(long, action, requires("acme_domain"), env = "ALLEGEDLY_ACME_IPV6")]
     acme_ipv6: bool,
+    /// only accept experimental requests at this hostname
+    ///
+    /// a cert will be provisioned for it from letsencrypt. if you're not using
+    /// acme (eg., behind a tls-terminating reverse proxy), open a feature request.
+    #[arg(
+        long,
+        requires("acme_domain"),
+        env = "ALLEGEDLY_EXPERIMENTAL_ACME_DOMAIN"
+    )]
+    experimental_acme_domain: Option<String>,
+    /// accept writes! by forwarding them upstream
+    #[arg(long, action, env = "ALLEGEDLY_EXPERIMENTAL_WRITE_UPSTREAM")]
+    experimental_write_upstream: bool,
 }
 
 pub async fn run(
@@ -55,6 +70,8 @@ pub async fn run(
         acme_cache_path,
         acme_directory_url,
         acme_ipv6,
+        experimental_acme_domain,
+        experimental_write_upstream,
     }: Args,
 ) -> anyhow::Result<()> {
     let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await?;
@@ -81,6 +98,11 @@ pub async fn run(
         (_, _, _) => unreachable!(),
     };
 
+    let experimental_conf = ExperimentalConf {
+        acme_domain: experimental_acme_domain,
+        write_upstream: experimental_write_upstream,
+    };
+
     let mut tasks = JoinSet::new();
 
     let (send_page, recv_page) = mpsc::channel(8);
@@ -90,7 +112,13 @@ pub async fn run(
 
     tasks.spawn(poll_upstream(Some(latest), poll_url, send_page));
     tasks.spawn(pages_to_pg(db.clone(), recv_page));
-    tasks.spawn(serve(upstream, wrap, listen_conf, db.clone()));
+    tasks.spawn(serve(
+        upstream,
+        wrap,
+        listen_conf,
+        experimental_conf,
+        db.clone(),
+    ));
 
     while let Some(next) = tasks.join_next().await {
         match next {

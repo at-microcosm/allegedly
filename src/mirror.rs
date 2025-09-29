@@ -1,13 +1,15 @@
-use crate::{CachedValue, Db, Dt, Fetcher, GovernorMiddleware, UA, logo};
+use crate::{
+    CachedValue, CreatePlcOpLimiter, Db, Dt, Fetcher, GovernorMiddleware, IpLimiters, UA, logo,
+};
 use futures::TryStreamExt;
 use governor::Quota;
 use poem::{
-    Endpoint, EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server, get,
-    handler,
+    Body, Endpoint, EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server,
+    get, handler,
     http::StatusCode,
     listener::{Listener, TcpListener, acme::AutoCert},
     middleware::{AddData, CatchPanic, Compression, Cors, Tracing},
-    web::{Data, Json},
+    web::{Data, Json, Path},
 };
 use reqwest::{Client, Url};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
@@ -19,6 +21,7 @@ struct State {
     upstream: Url,
     latest_at: CachedValue<Dt, GetLatestAt>,
     upstream_status: CachedValue<PlcStatus, CheckUpstream>,
+    experimental: ExperimentalConf,
 }
 
 #[handler]
@@ -69,14 +72,26 @@ fn favicon() -> impl IntoResponse {
     include_bytes!("../favicon.ico").with_content_type("image/x-icon")
 }
 
-fn failed_to_reach_wrapped() -> String {
+fn failed_to_reach_named(name: &str) -> String {
     format!(
         r#"{}
 
-Failed to reach the wrapped reference PLC server. Sorry.
+Failed to reach the {name} server. Sorry.
 "#,
         logo("mirror 502 :( ")
     )
+}
+
+fn bad_create_op(reason: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(format!(
+            r#"{}
+
+NooOOOooooo: {reason}
+"#,
+            logo("mirror 400 >:( ")
+        ))
 }
 
 type PlcStatus = (bool, serde_json::Value);
@@ -168,23 +183,8 @@ async fn health(
     )
 }
 
-#[handler]
-async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResponse> {
-    let mut target = state.plc.clone();
-    target.set_path(req.uri().path());
-    let upstream_res = state
-        .client
-        .get(target)
-        .timeout(Duration::from_secs(3)) // should be low latency to wrapped server
-        .headers(req.headers().clone())
-        .send()
-        .await
-        .map_err(|e| {
-            log::error!("upstream req fail: {e}");
-            Error::from_string(failed_to_reach_wrapped(), StatusCode::BAD_GATEWAY)
-        })?;
-
-    let http_res: poem::http::Response<reqwest::Body> = upstream_res.into();
+fn proxy_response(res: reqwest::Response) -> Response {
+    let http_res: poem::http::Response<reqwest::Body> = res.into();
     let (parts, reqw_body) = http_res.into_parts();
 
     let parts = poem::ResponseParts {
@@ -197,10 +197,90 @@ async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<impl IntoResp
     let body = http_body_util::BodyDataStream::new(reqw_body)
         .map_err(|e| std::io::Error::other(Box::new(e)));
 
-    Ok(Response::from_parts(
-        parts,
-        poem::Body::from_bytes_stream(body),
-    ))
+    Response::from_parts(parts, poem::Body::from_bytes_stream(body))
+}
+
+#[handler]
+async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<Response> {
+    let mut target = state.plc.clone();
+    target.set_path(req.uri().path());
+    let wrapped_res = state
+        .client
+        .get(target)
+        .timeout(Duration::from_secs(3)) // should be low latency to wrapped server
+        .headers(req.headers().clone())
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("upstream req fail: {e}");
+            Error::from_string(
+                failed_to_reach_named("wrapped reference PLC"),
+                StatusCode::BAD_GATEWAY,
+            )
+        })?;
+
+    Ok(proxy_response(wrapped_res))
+}
+
+#[handler]
+async fn forward_create_op_upstream(
+    Data(State {
+        upstream,
+        client,
+        experimental,
+        ..
+    }): Data<&State>,
+    Path(did): Path<String>,
+    req: &Request,
+    body: Body,
+) -> Result<Response> {
+    if let Some(expected_domain) = &experimental.acme_domain {
+        let Some(found_host) = req.header("Host") else {
+            return Ok(bad_create_op(&format!(
+                "missing `Host` header, expected {expected_domain} for experimental requests."
+            )));
+        };
+        if found_host != expected_domain {
+            return Ok(bad_create_op(&format!(
+                "experimental requests must be made to {expected_domain}, but this request's `Host` header was {found_host}"
+            )));
+        }
+    }
+
+    // adjust proxied headers
+    let mut headers: reqwest::header::HeaderMap = req.headers().clone();
+    log::trace!("original request headers: {headers:?}");
+    headers.insert("Host", upstream.host_str().unwrap().parse().unwrap());
+    let client_ua = headers
+        .get("User-Agent")
+        .map(|h| h.to_str().unwrap())
+        .unwrap_or("unknown");
+    headers.insert(
+        "User-Agent",
+        format!("{UA} (forwarding from {client_ua:?})")
+            .parse()
+            .unwrap(),
+    );
+    log::trace!("adjusted request headers: {headers:?}");
+
+    let mut target = upstream.clone();
+    target.set_path(&did);
+    let upstream_res = client
+        .post(target)
+        .timeout(Duration::from_secs(15)) // be a little generous
+        .headers(headers)
+        .body(reqwest::Body::wrap_stream(body.into_bytes_stream()))
+        .send()
+        .await
+        .map_err(|e| {
+            log::warn!("upstream write fail: {e}");
+            Error::from_string(
+                failed_to_reach_named("upstream PLC"),
+                StatusCode::BAD_GATEWAY,
+            )
+        })?;
+
+    Ok(proxy_response(upstream_res))
 }
 
 #[handler]
@@ -212,7 +292,9 @@ async fn nope(Data(State { upstream, .. }): Data<&State>) -> (StatusCode, String
 
 Sorry, this server does not accept POST requests.
 
-You may wish to try upstream: {upstream}
+You may wish to try sending that to our upstream: {upstream}.
+
+If you operate this server, try running with `--experimental-write-upstream`.
 "#,
             logo("mirror (nope)")
         ),
@@ -230,10 +312,17 @@ pub enum ListenConf {
     Bind(SocketAddr),
 }
 
+#[derive(Debug, Clone)]
+pub struct ExperimentalConf {
+    pub acme_domain: Option<String>,
+    pub write_upstream: bool,
+}
+
 pub async fn serve(
     upstream: Url,
     plc: Url,
     listen: ListenConf,
+    experimental: ExperimentalConf,
     db: Db,
 ) -> anyhow::Result<&'static str> {
     log::info!("starting server...");
@@ -257,19 +346,36 @@ pub async fn serve(
         upstream: upstream.clone(),
         latest_at,
         upstream_status,
+        experimental: experimental.clone(),
     };
 
-    let app = Route::new()
+    let mut app = Route::new()
         .at("/", get(hello))
         .at("/favicon.ico", get(favicon))
-        .at("/_health", get(health))
-        .at("/:any", get(proxy).post(nope))
+        .at("/_health", get(health));
+
+    if experimental.write_upstream {
+        log::info!("enabling experimental write forwarding to upstream");
+
+        let ip_limiter = IpLimiters::new(Quota::per_hour(10.try_into().unwrap()));
+        let did_limiter = CreatePlcOpLimiter::new(Quota::per_hour(4.try_into().unwrap()));
+
+        let upstream_proxier = forward_create_op_upstream
+            .with(GovernorMiddleware::new(did_limiter))
+            .with(GovernorMiddleware::new(ip_limiter));
+
+        app = app.at("/:any", get(proxy).post(upstream_proxier));
+    } else {
+        app = app.at("/:any", get(proxy).post(nope));
+    }
+
+    let app = app
         .with(AddData::new(state))
         .with(Cors::new().allow_credentials(false))
         .with(Compression::new())
-        .with(GovernorMiddleware::new(Quota::per_minute(
+        .with(GovernorMiddleware::new(IpLimiters::new(Quota::per_minute(
             3000.try_into().expect("ratelimit middleware to build"),
-        )))
+        ))))
         .with(CatchPanic::new())
         .with(Tracing);
 
@@ -288,6 +394,9 @@ pub async fn serve(
                 .directory_url(directory_url)
                 .cache_path(cache_path);
             for domain in domains {
+                auto_cert = auto_cert.domain(domain);
+            }
+            if let Some(domain) = experimental.acme_domain {
                 auto_cert = auto_cert.domain(domain);
             }
             let auto_cert = auto_cert.build().expect("acme config to build");

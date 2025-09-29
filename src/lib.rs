@@ -15,10 +15,10 @@ pub mod bin;
 pub use backfill::backfill;
 pub use cached_value::{CachedValue, Fetcher};
 pub use client::{CLIENT, UA};
-pub use mirror::{ListenConf, serve};
+pub use mirror::{ExperimentalConf, ListenConf, serve};
 pub use plc_pg::{Db, backfill_to_pg, pages_to_pg};
 pub use poll::{PageBoundaryState, get_page, poll_upstream};
-pub use ratelimit::GovernorMiddleware;
+pub use ratelimit::{CreatePlcOpLimiter, GovernorMiddleware, IpLimiters};
 pub use weekly::{BundleSource, FolderSource, HttpSource, Week, pages_to_weeks, week_to_pages};
 
 pub type Dt = chrono::DateTime<chrono::Utc>;
