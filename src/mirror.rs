@@ -241,6 +241,7 @@ async fn forward_create_op_upstream(
                 req.header(HOST),
                 req.headers()
             );
+            log::debug!("does it get put into uri??? {:?}", req.uri());
             return Ok(bad_create_op(&format!(
                 "missing `Host` header, expected {expected_domain:?} for experimental requests."
             )));
