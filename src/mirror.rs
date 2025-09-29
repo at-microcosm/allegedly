@@ -42,9 +42,8 @@ fn hello(
             "    - POST /:did     Create a PLC op. Allegedly will forward it upstream.".to_string()
         }
         (_, Some(d), _) => format!(
-            r#"\
-    - POST /*        Rejected, but experimental upstream op forwarding is
-                     available at `POST {d}/:did`!"#
+            r#"    - POST /*        Rejected, but experimental upstream op forwarding is
+                     available at `POST https://{d}/:did`!"#
         ),
     };
 
