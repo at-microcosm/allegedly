@@ -236,13 +236,18 @@ async fn forward_create_op_upstream(
 ) -> Result<Response> {
     if let Some(expected_domain) = &experimental.acme_domain {
         let Some(found_host) = req.header(HOST) else {
+            log::debug!(
+                "expected experimental domain but missing host header. {:?}; {:?}",
+                req.header(HOST),
+                req.headers()
+            );
             return Ok(bad_create_op(&format!(
-                "missing `Host` header, expected {expected_domain} for experimental requests."
+                "missing `Host` header, expected {expected_domain:?} for experimental requests."
             )));
         };
         if found_host != expected_domain {
             return Ok(bad_create_op(&format!(
-                "experimental requests must be made to {expected_domain}, but this request's `Host` header was {found_host}"
+                "experimental requests must be made to {expected_domain:?}, but this request's `Host` header was {found_host}"
             )));
         }
     }
