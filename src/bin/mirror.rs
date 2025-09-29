@@ -85,10 +85,14 @@ pub async fn run(
 
     let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
         (_, false, Some(cache_path)) => {
-            log::info!("configuring acme for https at {acme_domain:?}...");
             create_dir_all(&cache_path).await?;
+            let mut domains = acme_domain.clone();
+            if let Some(ref experimental_domain) = experimental_acme_domain {
+                domains.push(experimental_domain.clone())
+            }
+            log::info!("configuring acme for https at {domains:?}...");
             ListenConf::Acme {
-                domains: acme_domain,
+                domains,
                 cache_path,
                 directory_url: acme_directory_url.to_string(),
                 ipv6: acme_ipv6,

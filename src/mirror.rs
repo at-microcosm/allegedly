@@ -396,10 +396,9 @@ pub async fn serve(
             for domain in domains {
                 auto_cert = auto_cert.domain(domain);
             }
-            if let Some(domain) = experimental.acme_domain {
-                auto_cert = auto_cert.domain(domain);
-            }
             let auto_cert = auto_cert.build().expect("acme config to build");
+
+            log::trace!("auto_cert: {auto_cert:?}");
 
             let notice_task = tokio::task::spawn(run_insecure_notice(ipv6));
             let listener = TcpListener::bind(if ipv6 { "[::]:443" } else { "0.0.0.0:443" });
