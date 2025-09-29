@@ -6,7 +6,7 @@ use governor::Quota;
 use poem::{
     Body, Endpoint, EndpointExt, Error, IntoResponse, Request, Response, Result, Route, Server,
     get, handler,
-    http::StatusCode,
+    http::{StatusCode, header::HOST, header::USER_AGENT},
     listener::{Listener, TcpListener, acme::AutoCert},
     middleware::{AddData, CatchPanic, Compression, Cors, Tracing},
     web::{Data, Json, Path},
@@ -235,7 +235,7 @@ async fn forward_create_op_upstream(
     body: Body,
 ) -> Result<Response> {
     if let Some(expected_domain) = &experimental.acme_domain {
-        let Some(found_host) = req.header("Host") else {
+        let Some(found_host) = req.header(HOST) else {
             return Ok(bad_create_op(&format!(
                 "missing `Host` header, expected {expected_domain} for experimental requests."
             )));
@@ -252,11 +252,11 @@ async fn forward_create_op_upstream(
     log::trace!("original request headers: {headers:?}");
     headers.insert("Host", upstream.host_str().unwrap().parse().unwrap());
     let client_ua = headers
-        .get("User-Agent")
+        .get(USER_AGENT)
         .map(|h| h.to_str().unwrap())
         .unwrap_or("unknown");
     headers.insert(
-        "User-Agent",
+        USER_AGENT,
         format!("{UA} (forwarding from {client_ua:?})")
             .parse()
             .unwrap(),
