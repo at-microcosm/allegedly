@@ -26,9 +26,14 @@ Allegedly can
     sudo allegedly mirror \
       --upstream "https://plc.directory" \
       --wrap "http://127.0.0.1:3000" \
+      --wrap-pg-cert "/opt/allegedly/postgres-cert.pem" \
       --acme-domain "plc.wtf" \
+      --acme-domain "alt.plc.wtf" \
+      --experimental-acme-domain "experimental.plc.wtf" \
       --acme-cache-path ./acme-cache \
-      --acme-directory-url "https://acme-staging-v02.api.letsencrypt.org/directory"
+      --acme-directory-url "https://acme-staging-v02.api.letsencrypt.org/directory" \
+      --acme-ipv6 \
+      --experimental-write-upstream
     ```
 
 
@@ -68,11 +73,11 @@ to install the latest from source:
 
 ### new things
 
-- experimental: websocket version of /export
-- experimental: accept writes by forwarding them upstream
-- experimental: serve a tlog
-- experimental: embed a log database directly for fast and efficient mirroring
-- experimental: support multiple upstreams?
+- [ ] experimental: websocket version of /export
+- [x] experimental: accept writes by forwarding them upstream
+- [ ] experimental: serve a tlog
+- [ ] experimental: embed a log database directly for fast and efficient mirroring
+- [ ] experimental: support multiple upstreams?
 
 - [ ] new command todo: `zip` or `check` or `diff`: compare two plc logs over some time range
 - [ ] new command to consider: `scatter` or something: broadcast plc writes to multiple upstreams

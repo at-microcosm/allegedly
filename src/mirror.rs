@@ -25,7 +25,29 @@ struct State {
 }
 
 #[handler]
-fn hello(Data(State { upstream, .. }): Data<&State>) -> String {
+fn hello(
+    Data(State {
+        upstream,
+        experimental: exp,
+        ..
+    }): Data<&State>,
+    req: &Request,
+) -> String {
+    let post_info = match (exp.write_upstream, &exp.acme_domain, req.uri().host()) {
+        (false, _, _) => "    - POST /*        Always rejected. This is a mirror.".to_string(),
+        (_, None, _) => {
+            "    - POST /:did     Create a PLC op. Allegedly will forward it upstream.".to_string()
+        }
+        (_, Some(d), Some(f)) if f == d => {
+            "    - POST /:did     Create a PLC op. Allegedly will forward it upstream.".to_string()
+        }
+        (_, Some(d), _) => format!(
+            r#"\
+    - POST /*        Rejected, but experimental upstream op forwarding is
+                     available at `POST {d}/:did`!"#
+        ),
+    };
+
     format!(
         r#"{}
 
@@ -45,10 +67,9 @@ Available APIs:
     - GET  /*        Proxies to wrapped server; see PLC API docs:
                      https://web.plc.directory/api/redoc
 
-    - POST /*        Always rejected. This is a mirror.
+                     tip: try `GET /{{did}}` to resolve an identity
 
-
-    tip: try `GET /{{did}}` to resolve an identity
+{post_info}
 
 
 Allegedly is a suite of open-source CLI tools from for working with PLC logs,
