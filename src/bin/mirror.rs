@@ -3,7 +3,7 @@ use allegedly::{
 };
 use clap::Parser;
 use reqwest::Url;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::{fs::create_dir_all, sync::mpsc, task::JoinSet};
 
 #[derive(Debug, clap::Args)]
@@ -60,7 +60,10 @@ pub struct Args {
 }
 
 pub async fn run(
-    GlobalArgs { upstream }: GlobalArgs,
+    GlobalArgs {
+        upstream,
+        upstream_throttle_ms,
+    }: GlobalArgs,
     Args {
         wrap,
         wrap_pg,
@@ -113,8 +116,9 @@ pub async fn run(
 
     let mut poll_url = upstream.clone();
     poll_url.set_path("/export");
+    let throttle = Duration::from_millis(upstream_throttle_ms);
 
-    tasks.spawn(poll_upstream(Some(latest), poll_url, send_page));
+    tasks.spawn(poll_upstream(Some(latest), poll_url, throttle, send_page));
     tasks.spawn(pages_to_pg(db.clone(), recv_page));
     tasks.spawn(serve(
         upstream,

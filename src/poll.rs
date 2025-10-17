@@ -4,9 +4,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-// plc.directory ratelimit on /export is 500 per 5 mins
-const UPSTREAM_REQUEST_INTERVAL: Duration = Duration::from_millis(600);
-
 #[derive(Debug, Error)]
 pub enum GetPageError {
     #[error(transparent)]
@@ -141,7 +138,11 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageE
         .split('\n')
         .filter_map(|s| {
             serde_json::from_str::<Op>(s)
-                .inspect_err(|e| log::warn!("failed to parse op: {e} ({s})"))
+                .inspect_err(|e| {
+                    if !s.is_empty() {
+                        log::warn!("failed to parse op: {e} ({s})")
+                    }
+                })
                 .ok()
         })
         .collect();
@@ -154,10 +155,11 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageE
 pub async fn poll_upstream(
     after: Option<Dt>,
     base: Url,
+    throttle: Duration,
     dest: mpsc::Sender<ExportPage>,
 ) -> anyhow::Result<&'static str> {
-    log::info!("starting upstream poller after {after:?}");
-    let mut tick = tokio::time::interval(UPSTREAM_REQUEST_INTERVAL);
+    log::info!("starting upstream poller at {base} after {after:?}");
+    let mut tick = tokio::time::interval(throttle);
     let mut prev_last: Option<LastOp> = after.map(Into::into);
     let mut boundary_state: Option<PageBoundaryState> = None;
     loop {

@@ -1,6 +1,6 @@
 use allegedly::{Dt, bin::GlobalArgs, bin_init, pages_to_stdout, pages_to_weeks, poll_upstream};
 use clap::{CommandFactory, Parser, Subcommand};
-use std::{path::PathBuf, time::Instant};
+use std::{path::PathBuf, time::Duration, time::Instant};
 use tokio::fs::create_dir_all;
 use tokio::sync::mpsc;
 
@@ -76,9 +76,10 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let mut url = globals.upstream;
             url.set_path("/export");
+            let throttle = Duration::from_millis(globals.upstream_throttle_ms);
             let (tx, rx) = mpsc::channel(32); // read ahead if gzip stalls for some reason
             tokio::task::spawn(async move {
-                poll_upstream(Some(after), url, tx)
+                poll_upstream(Some(after), url, throttle, tx)
                     .await
                     .expect("to poll upstream")
             });
@@ -95,9 +96,10 @@ async fn main() -> anyhow::Result<()> {
             let mut url = globals.upstream;
             url.set_path("/export");
             let start_at = after.or_else(|| Some(chrono::Utc::now()));
+            let throttle = Duration::from_millis(globals.upstream_throttle_ms);
             let (tx, rx) = mpsc::channel(1);
             tokio::task::spawn(async move {
-                poll_upstream(start_at, url, tx)
+                poll_upstream(start_at, url, throttle, tx)
                     .await
                     .expect("to poll upstream")
             });

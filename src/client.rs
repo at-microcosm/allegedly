@@ -12,6 +12,7 @@ pub const UA: &str = concat!(
 pub static CLIENT: LazyLock<ClientWithMiddleware> = LazyLock::new(|| {
     let inner = Client::builder()
         .user_agent(UA)
+        .gzip(true)
         .build()
         .expect("reqwest client to build");
 

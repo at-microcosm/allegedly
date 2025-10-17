@@ -4,7 +4,7 @@ use allegedly::{
 };
 use clap::Parser;
 use reqwest::Url;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
@@ -53,7 +53,10 @@ pub struct Args {
 }
 
 pub async fn run(
-    GlobalArgs { upstream }: GlobalArgs,
+    GlobalArgs {
+        upstream,
+        upstream_throttle_ms,
+    }: GlobalArgs,
     Args {
         http,
         dir,
@@ -98,7 +101,8 @@ pub async fn run(
         }
         let mut upstream = upstream;
         upstream.set_path("/export");
-        tasks.spawn(poll_upstream(None, upstream, poll_tx));
+        let throttle = Duration::from_millis(upstream_throttle_ms);
+        tasks.spawn(poll_upstream(None, upstream, throttle, poll_tx));
         tasks.spawn(full_pages(poll_out, full_tx));
         tasks.spawn(pages_to_stdout(full_out, None));
     } else {
@@ -128,10 +132,12 @@ pub async fn run(
 
         // and the catch-up source...
         if let Some(last) = found_last_out {
+            let throttle = Duration::from_millis(upstream_throttle_ms);
             tasks.spawn(async move {
                 let mut upstream = upstream;
                 upstream.set_path("/export");
-                poll_upstream(last.await?, upstream, poll_tx).await
+
+                poll_upstream(last.await?, upstream, throttle, poll_tx).await
             });
         }
 
