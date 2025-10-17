@@ -509,8 +509,8 @@ You probably want to change your request to use HTTPS instead of HTTP.
     }
 
     let app = Route::new()
-        .at("/:any", get(oop_plz_be_secure))
         .at("/favicon.ico", get(favicon))
+        .nest("/", get(oop_plz_be_secure))
         .with(Tracing);
     Server::new(TcpListener::bind(if ipv6 {
         "[::]:80"
