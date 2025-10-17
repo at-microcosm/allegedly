@@ -224,6 +224,7 @@ fn proxy_response(res: reqwest::Response) -> Response {
 async fn proxy(req: &Request, Data(state): Data<&State>) -> Result<Response> {
     let mut target = state.plc.clone();
     target.set_path(req.uri().path());
+    target.set_query(req.uri().query());
     let wrapped_res = state
         .client
         .get(target)
