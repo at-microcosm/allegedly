@@ -51,15 +51,19 @@ impl From<Dt> for LastOp {
     }
 }
 
-/// PLC
+/// State for removing duplicates ops between PLC export page boundaries
 #[derive(Debug, PartialEq)]
 pub struct PageBoundaryState {
+    /// The previous page's last timestamp
+    ///
+    /// Duplicate ops from /export only occur for the same exact timestamp
     pub last_at: Dt,
+    /// The previous page's ops at its last timestamp
     keys_at: Vec<OpKey>, // expected to ~always be length one
 }
 
-/// track keys at final createdAt to deduplicate the start of the next page
 impl PageBoundaryState {
+    /// Initialize the boundary state with a PLC page
     pub fn new(page: &ExportPage) -> Option<Self> {
         // grab the very last op
         let (last_at, last_key) = page.ops.last().map(|op| (op.created_at, op.into()))?;
@@ -75,6 +79,13 @@ impl PageBoundaryState {
 
         Some(me)
     }
+    /// Apply the deduplication and update state
+    ///
+    /// The beginning of the page will be modified to remove duplicates from the
+    /// previous page.
+    ///
+    /// The end of the page is inspected to update the deduplicator state for
+    /// the next page.
     fn apply_to_next(&mut self, page: &mut ExportPage) {
         // walk ops forward, kicking previously-seen ops until created_at advances
         let to_remove: Vec<usize> = page
@@ -124,6 +135,9 @@ impl PageBoundaryState {
     }
 }
 
+/// Get one PLC export page
+///
+/// Extracts the final op so it can be used to fetch the following page
 pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageError> {
     log::trace!("Getting page: {url}");
 
@@ -152,6 +166,44 @@ pub async fn get_page(url: Url) -> Result<(ExportPage, Option<LastOp>), GetPageE
     Ok((ExportPage { ops }, last_op))
 }
 
+/// Poll an upstream PLC server for new ops
+///
+/// Pages of operations are written to the `dest` channel.
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// use allegedly::{ExportPage, Op, poll_upstream};
+///
+/// // set to `None` to replay from the beginning of the PLC history
+/// let after = Some(chrono::Utc::now());
+///
+/// // the PLC server to poll for new ops
+/// let upstream = "https://plc.wtf/export".parse().unwrap();
+///
+/// // self-rate-limit (plc.directory's limit interval is 600ms)
+/// let throttle = std::time::Duration::from_millis(300);
+///
+/// // pages are sent out of the poller via a tokio mpsc channel
+/// let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+///
+/// // spawn a tokio task to run the poller
+/// tokio::task::spawn(poll_upstream(after, upstream, throttle, tx));
+///
+/// // receive pages of plc ops from the poller
+/// while let Some(ExportPage { ops }) = rx.recv().await {
+///     println!("received {} plc ops", ops.len());
+///
+///     for Op { did, cid, operation, .. } in ops {
+///         // in this example we're alerting when changes are found for one
+///         // specific identity
+///         if did == "did:plc:hdhoaan3xa3jiuq4fg4mefid" {
+///             println!("Update found for {did}! cid={cid}\n -> operation: {}", operation.get());
+///         }
+///     }
+/// }
+/// # }
+/// ```
 pub async fn poll_upstream(
     after: Option<Dt>,
     base: Url,
