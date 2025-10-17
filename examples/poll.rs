@@ -27,7 +27,9 @@ async fn main() {
             if op.did == "did:plc:hdhoaan3xa3jiuq4fg4mefid" {
                 println!(
                     "Update found for {}! cid={}\n -> operation: {}",
-                    op.did, op.cid, op.operation.get()
+                    op.did,
+                    op.cid,
+                    op.operation.get()
                 );
             }
         }
