@@ -36,6 +36,19 @@ Allegedly can
       --experimental-write-upstream
     ```
 
+- Reverse-proxy to any PLC server, terminating TLS and forwarding writes upstream
+
+    ```bash
+    sudo allegedly wrap \
+      --wrap "http://127.0.0.1:3000" \
+      --acme-ipv6 \
+      --acme-cache-path ./acme-cache \
+      --acme-domain "plc.wtf" \
+      --experimental-acme-domain "experimental.plc.wtf" \
+      --experimental-write-upstream \
+      --upstream "https://plc.wtf" \
+    ```
+
 
 add `--help` to any command for more info about it
 
@@ -66,7 +79,7 @@ to install the latest from source:
 - monitoring of the various tasks
 - health check pings
 - expose metrics/tracing
-- read-only flag for mirror wrapper
+- [x] read-only flag for mirror wrapper
 - bundle: write directly to s3-compatible object storage
 - helpers for automating periodic `bundle` runs
 

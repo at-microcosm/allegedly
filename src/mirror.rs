@@ -19,20 +19,56 @@ struct State {
     client: Client,
     plc: Url,
     upstream: Url,
+    sync_info: Option<SyncInfo>,
+    experimental: ExperimentalConf,
+}
+
+/// server info that only applies in mirror (synchronizing) mode
+#[derive(Clone)]
+struct SyncInfo {
     latest_at: CachedValue<Dt, GetLatestAt>,
     upstream_status: CachedValue<PlcStatus, CheckUpstream>,
-    experimental: ExperimentalConf,
 }
 
 #[handler]
 fn hello(
     Data(State {
+        sync_info,
         upstream,
         experimental: exp,
         ..
     }): Data<&State>,
     req: &Request,
 ) -> String {
+    // let mode = if sync_info.is_some() { "mirror" } else { "wrap" };
+    let pre_info = if sync_info.is_some() {
+        format!(
+            r#"
+This is a PLC[1] mirror running Allegedly in mirror mode. Mirror mode wraps and
+synchronizes a local PLC reference server instance[2] (why?[3]).
+
+
+Configured upstream:
+
+    {upstream}
+
+"#
+        )
+    } else {
+        format!(
+            r#"
+This is a PLC[1] mirror running Allegedly in wrap mode. Wrap mode reverse-
+proxies requests to a PLC server and can terminate TLS, like NGINX or Caddy.
+
+
+Configured upstream (only used if experimental op forwarding is enabled):
+
+    {upstream}
+
+"#
+        )
+    };
+
     let post_info = match (exp.write_upstream, &exp.acme_domain, req.uri().host()) {
         (false, _, _) => "    - POST /*        Always rejected. This is a mirror.".to_string(),
         (_, None, _) => {
@@ -49,15 +85,7 @@ fn hello(
 
     format!(
         r#"{}
-
-This is a PLC[1] mirror running Allegedly in mirror mode. Mirror mode wraps and
-synchronizes a local PLC reference server instance[2] (why?[3]).
-
-
-Configured upstream:
-
-    {upstream}
-
+{pre_info}
 
 Available APIs:
 
@@ -176,8 +204,7 @@ async fn health(
     Data(State {
         plc,
         client,
-        latest_at,
-        upstream_status,
+        sync_info,
         ..
     }): Data<&State>,
 ) -> impl IntoResponse {
@@ -186,21 +213,38 @@ async fn health(
     if !ok {
         overall_status = StatusCode::BAD_GATEWAY;
     }
-    let (ok, upstream_status) = upstream_status.get().await.expect("plc_status infallible");
-    if !ok {
-        overall_status = StatusCode::BAD_GATEWAY;
+    if let Some(SyncInfo {
+        latest_at,
+        upstream_status,
+    }) = sync_info
+    {
+        // mirror mode
+        let (ok, upstream_status) = upstream_status.get().await.expect("plc_status infallible");
+        if !ok {
+            overall_status = StatusCode::BAD_GATEWAY;
+        }
+        let latest = latest_at.get().await.ok();
+        (
+            overall_status,
+            Json(serde_json::json!({
+                "server": "allegedly (mirror)",
+                "version": env!("CARGO_PKG_VERSION"),
+                "wrapped_plc": wrapped_status,
+                "upstream_plc": upstream_status,
+                "latest_at": latest,
+            })),
+        )
+    } else {
+        // wrap mode
+        (
+            overall_status,
+            Json(serde_json::json!({
+                "server": "allegedly (mirror)",
+                "version": env!("CARGO_PKG_VERSION"),
+                "wrapped_plc": wrapped_status,
+            })),
+        )
     }
-    let latest = latest_at.get().await.ok();
-    (
-        overall_status,
-        Json(serde_json::json!({
-            "server": "allegedly (mirror)",
-            "version": env!("CARGO_PKG_VERSION"),
-            "wrapped_plc": wrapped_status,
-            "upstream_plc": upstream_status,
-            "latest_at": latest,
-        })),
-    )
 }
 
 fn proxy_response(res: reqwest::Response) -> Response {
@@ -344,7 +388,7 @@ pub async fn serve(
     plc: Url,
     listen: ListenConf,
     experimental: ExperimentalConf,
-    db: Db,
+    db: Option<Db>,
 ) -> anyhow::Result<&'static str> {
     log::info!("starting server...");
 
@@ -355,18 +399,20 @@ pub async fn serve(
         .build()
         .expect("reqwest client to build");
 
-    let latest_at = CachedValue::new(GetLatestAt(db), Duration::from_secs(2));
-    let upstream_status = CachedValue::new(
-        CheckUpstream(upstream.clone(), client.clone()),
-        Duration::from_secs(6),
-    );
+    // when `db` is None, we're running in wrap mode. no db access, no upstream sync
+    let sync_info = db.map(|db| SyncInfo {
+        latest_at: CachedValue::new(GetLatestAt(db), Duration::from_secs(2)),
+        upstream_status: CachedValue::new(
+            CheckUpstream(upstream.clone(), client.clone()),
+            Duration::from_secs(6),
+        ),
+    });
 
     let state = State {
         client,
         plc,
         upstream: upstream.clone(),
-        latest_at,
-        upstream_status,
+        sync_info,
         experimental: experimental.clone(),
     };
 

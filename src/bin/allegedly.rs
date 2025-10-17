@@ -49,6 +49,11 @@ enum Commands {
         #[command(flatten)]
         args: mirror::Args,
     },
+    /// Wrap any did-method-plc server, without syncing upstream (read-only)
+    Wrap {
+        #[command(flatten)]
+        args: mirror::Args,
+    },
     /// Poll an upstream PLC server and log new ops to stdout
     Tail {
         /// Begin tailing from a specific timestamp for replay or wait-until
@@ -91,7 +96,8 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .expect("to write bundles to output files");
         }
-        Commands::Mirror { args } => mirror::run(globals, args).await?,
+        Commands::Mirror { args } => mirror::run(globals, args, true).await?,
+        Commands::Wrap { args } => mirror::run(globals, args, false).await?,
         Commands::Tail { after } => {
             let mut url = globals.upstream;
             url.set_path("/export");

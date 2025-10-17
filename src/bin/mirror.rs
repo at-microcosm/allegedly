@@ -13,7 +13,7 @@ pub struct Args {
     wrap: Url,
     /// the wrapped did-method-plc server's database (write access required)
     #[arg(long, env = "ALLEGEDLY_WRAP_PG")]
-    wrap_pg: Url,
+    wrap_pg: Option<Url>,
     /// path to tls cert for the wrapped postgres db, if needed
     #[arg(long, env = "ALLEGEDLY_WRAP_PG_CERT")]
     wrap_pg_cert: Option<PathBuf>,
@@ -76,16 +76,8 @@ pub async fn run(
         experimental_acme_domain,
         experimental_write_upstream,
     }: Args,
+    sync: bool,
 ) -> anyhow::Result<()> {
-    let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await?;
-
-    // TODO: allow starting up with polling backfill from beginning?
-    log::debug!("getting the latest op from the db...");
-    let latest = db
-        .get_latest()
-        .await?
-        .expect("there to be at least one op in the db. did you backfill?");
-
     let listen_conf = match (bind, acme_domain.is_empty(), acme_cache_path) {
         (_, false, Some(cache_path)) => {
             create_dir_all(&cache_path).await?;
@@ -112,14 +104,32 @@ pub async fn run(
 
     let mut tasks = JoinSet::new();
 
-    let (send_page, recv_page) = mpsc::channel(8);
+    let db = if sync {
+        let wrap_pg = wrap_pg.ok_or(anyhow::anyhow!(
+            "a wrapped reference postgres must be provided to sync"
+        ))?;
+        let db = Db::new(wrap_pg.as_str(), wrap_pg_cert).await?;
 
-    let mut poll_url = upstream.clone();
-    poll_url.set_path("/export");
-    let throttle = Duration::from_millis(upstream_throttle_ms);
+        // TODO: allow starting up with polling backfill from beginning?
+        log::debug!("getting the latest op from the db...");
+        let latest = db
+            .get_latest()
+            .await?
+            .expect("there to be at least one op in the db. did you backfill?");
 
-    tasks.spawn(poll_upstream(Some(latest), poll_url, throttle, send_page));
-    tasks.spawn(pages_to_pg(db.clone(), recv_page));
+        let (send_page, recv_page) = mpsc::channel(8);
+
+        let mut poll_url = upstream.clone();
+        poll_url.set_path("/export");
+        let throttle = Duration::from_millis(upstream_throttle_ms);
+
+        tasks.spawn(poll_upstream(Some(latest), poll_url, throttle, send_page));
+        tasks.spawn(pages_to_pg(db.clone(), recv_page));
+        Some(db)
+    } else {
+        None
+    };
+
     tasks.spawn(serve(
         upstream,
         wrap,
@@ -157,6 +167,9 @@ struct CliArgs {
     globals: GlobalArgs,
     #[command(flatten)]
     args: Args,
+    /// Run the mirror in wrap mode, no upstream synchronization (read-only)
+    #[arg(long, action)]
+    wrap_mode: bool,
 }
 
 #[allow(dead_code)]
@@ -164,6 +177,6 @@ struct CliArgs {
 async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
     bin_init("mirror");
-    run(args.globals, args.args).await?;
+    run(args.globals, args.args, !args.wrap_mode).await?;
     Ok(())
 }
